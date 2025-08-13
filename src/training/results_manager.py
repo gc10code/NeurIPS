@@ -60,33 +60,63 @@ class ResultsManager:
 
         
     @staticmethod
-    def save_best_model(model: torch.nn.Module, output_dir: Path) -> None:
-        """Save the best model"""
+    def save_best_model(model: RPropMLP, model_path: Path):
         try:
-            # Ensure output directory exists
-            output_dir = Path(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            best_result_file = output_dir / 'best_model.pth'
-            
-            torch.save(model.state_dict(), best_result_file)
-            lprint(ll.INFO, f"Best model saved to {best_result_file}")
-
-        except Exception as e:
-            error_msg = f"Failed to save best model to {best_result_file}: {str(e)}"
-            lprint(ll.ERROR,  f"{error_msg}")
-            raise
-
-    @staticmethod
-    def load_best_model(model_path:Path)-> torch.nn.Module:
-        try:
-            model = RPropMLP(input_size=None, hidden_layers=None, output_size=1, activations=None)
-            with open(model_path, "rb") as f:
-                model.load_state_dict(torch.load(f))
-            return model
+            save_dict = {
+                'state_dict': model.state_dict(),
+                'input_size': model.input_size,
+                'hidden_layers': model.hidden_layers,
+                'output_size': model.output_size,
+                'activations': model.activations,
+                'dropout_prob': model.dropout_prob,
+                'batch_norm': model.batch_norm,
+                'problem_type': model.problem_type
+            }
+            with open(model_path, "wb") as f:
+                torch.save(save_dict, f)
+            lprint(ll.INFO, f"Saved model to {model_path}")
         except (IOError, PermissionError) as e:
-            error_msg = f"Failed to save best result to {model_path}: {str(e)}"
-            lprint(ll.ERROR,  f"{error_msg}")
-            raise IOOperationError(error_msg)
+            error_msg = f"Failed to save model to {model_path}: {str(e)}"
+            lprint(ll.ERROR, error_msg)
+            raise IOError(error_msg)
+
+    
+    @staticmethod
+    def load_best_model(model_path: Path) -> torch.nn.Module:
+        try:
+            # Load the saved dictionary
+            with open(model_path, "rb") as f:
+                save_dict = torch.load(f, map_location='cpu')  # Load to CPU first for flexibility
+            
+            # Extract architecture parameters
+            input_size = save_dict['input_size']
+            hidden_layers = save_dict['hidden_layers']
+            output_size = save_dict['output_size']
+            activations = save_dict['activations']
+            dropout_prob = save_dict.get('dropout_prob', 0.3)  # Default if not saved
+            batch_norm = save_dict.get('batch_norm', False)
+            problem_type = save_dict.get('problem_type', 'regression')
+            
+            # Initialize model with saved parameters
+            model = RPropMLP(
+                input_size=input_size,
+                hidden_layers=hidden_layers,
+                output_size=output_size,
+                activations=activations,
+                dropout_prob=dropout_prob,
+                batch_norm=batch_norm,
+                problem_type=problem_type
+            )
+            
+            # Load state_dict
+            model.load_state_dict(save_dict['state_dict'])
+            model.eval()  # Set to evaluation mode
+            lprint(ll.INFO, f"Loaded model from {model_path}")
+            return model
+        except (IOError, PermissionError, KeyError) as e:
+            error_msg = f"Failed to load model from {model_path}: {str(e)}"
+            lprint(ll.ERROR, error_msg)
+            raise IOError(error_msg)
         
     @staticmethod
     def best_model_selection(fold_results: List[dict]) -> RPropMLP:

@@ -45,11 +45,8 @@ def setup_device(device: Optional[torch.device] = torch.device('cpu')) -> torch.
     if device.type == 'cuda':
         try:
             total_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-            lprint(ll.INFO,  f"Using GPU: {torch.cuda.get_device_name()}, Memory: {total_memory:.1f} GB")
         except RuntimeError as e:
-            lprint(ll.WARN,  f"GPU detection failed: {str(e)}. Falling back to CPU.")
             device = torch.device('cpu')
-    lprint(ll.INFO,  f"Using device: {device}")
     return device
 
 def remove_dir(path:Path):

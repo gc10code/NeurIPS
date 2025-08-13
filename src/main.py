@@ -24,7 +24,7 @@ from src.utils.logging import lprint, LoggingLevels as ll
 MAX_COMBINATION = 20
 PRETRAINING = True
 targets = ["Density", "FFV", "Rg", "Tc", "Tg"]
-
+device = setup_device()
 
 if __name__ == "__main__":
     # Register signal handlers
@@ -32,6 +32,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, signal_handler)
     
     lprint(ll.SUCCESS,  f"=== Main Script Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    lprint(ll.INFO,  f"Device: {device}")
     
     true_targets = []
     try:
@@ -80,8 +81,6 @@ if __name__ == "__main__":
             remove_dir(Path(fusion_config.output_dir))
             os.makedirs(fusion_config.output_dir, exist_ok=True)
             lprint(ll.INFO,  f"Fusion model output directory created: {fusion_config.output_dir}")
-            
-            device = setup_device()
             lprint(ll.INFO,  f"Using device: {device}")
             
             fusion_model, final_loss = fusion_model_main(targets, true_targets, project_root, device, MAX_COMBINATION)

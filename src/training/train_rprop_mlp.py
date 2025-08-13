@@ -494,7 +494,7 @@ def rprop_mlp_main(target:str, config: ModelConfig, X: np.ndarray, y: np.ndarray
         final_tasks = create_tasks(final_config, final_params, X_norm, y_norm, device, 1)
         final_fold_results = run_training(final_tasks, use_multiprocessing=False)  # Disable multiprocessing for stability
         final_model = ResultsManager.best_model_selection(final_fold_results)
-        ResultsManager.save_best_model(final_model, Path(final_config.output_dir) / target) 
+        ResultsManager.save_best_model(final_model, Path(final_config.output_dir) / target/ "best_model.pth") 
         lprint(ll.REPORT,  f"Final model retraining completed and saved in {final_config.output_dir}")
         return final_model
     

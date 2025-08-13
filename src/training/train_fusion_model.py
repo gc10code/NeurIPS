@@ -30,11 +30,6 @@ from src.utils.logging import lprint, LoggingLevels as ll
 su.set_seed(42)
 device = su.setup_device()
 
-def signal_handler(sig, frame):
-    """Handle interrupt signals."""
-    lprint(ll.ERROR,  f"Received signal {sig}, shutting down")
-    raise SystemExit("Terminated by signal")
-
 def train_model(model: FusionModel, dataloader: DataLoader, teacher_models: List[RPropMLP], 
                 weights, alpha: float, beta: float, config: FusionConfig) -> float:
     """Train the fusion model and return the best validation loss."""
@@ -185,7 +180,7 @@ def fusion_model_main(targets: List[str], true_targets: List[tuple], project_roo
         for i, data in enumerate(true_targets):
             try:
                 lprint(ll.INFO,  f"Processing teacher model {i+1}/{len(true_targets)} for target {targets[i]}")
-                num_targets_list.append(data[2])  # Assuming data[2] is the number of targets
+                num_targets_list.append(data[2]) # add number of target
                 model_path = Path(f"{project_root}/output/{targets[i]}/best_model.pth")
                 
                 if not model_path.exists():
