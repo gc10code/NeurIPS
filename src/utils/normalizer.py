@@ -5,8 +5,7 @@ from typing import Optional, Tuple, Union
 import logging
 
 from src.utils.validators import DataValidator
-
-logger = logging.getLogger('RPropMLP')
+from src.utils.logging import lprint, LoggingLevels as ll
 
 class DataNormalizer:
     """Handles data normalization with checks for pre-normalized data."""
@@ -25,7 +24,7 @@ class DataNormalizer:
         X, y = DataValidator.validate_data(X, y)
         
         if self.input_norm != 'none' and self._is_normalized(X):
-            logger.info("Input data appears already normalized, skipping normalization")
+            lprint(ll.INFO,  "Input data appears already normalized, skipping normalization")
             self.input_norm = 'none'
         
         if self.input_norm == 'zscore':
@@ -36,7 +35,7 @@ class DataNormalizer:
             X = self.scaler_X.fit_transform(X)
         
         if self.output_norm != 'none' and self._is_normalized(y):
-            logger.info("Output data appears already normalized, skipping normalization")
+            lprint(ll.INFO,  "Output data appears already normalized, skipping normalization")
             self.output_norm = 'none'
         
         if self.output_norm == 'zscore':

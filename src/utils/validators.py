@@ -3,8 +3,7 @@ from typing import Dict, Any, Union, List, Tuple
 import logging
 
 from src.utils.activations import validate_activations
-
-logger = logging.getLogger('RPropMLP')
+from src.utils.logging import lprint, LoggingLevels as ll
 
 class ConfigValidator:
     """Validates configuration parameters."""
@@ -90,14 +89,14 @@ class DataValidator:
         y_invalid = np.isnan(y) | np.isinf(y)
         
         if np.any(X_invalid) or np.any(y_invalid):
-            logger.warning(f"Found {np.sum(X_invalid)} invalid values in X and {np.sum(y_invalid)} in y")
+            lprint(ll.WARN,  f"Found {np.sum(X_invalid)} invalid values in X and {np.sum(y_invalid)} in y")
             valid_mask = ~(np.any(X_invalid, axis=1) | np.any(y_invalid, axis=1))
             if np.sum(valid_mask) == 0:
                 raise ValueError("No valid samples remaining after removing NaN/inf values")
             
             X = X[valid_mask]
             y = y[valid_mask]
-            logger.info(f"Removed invalid samples, remaining: {len(X)}")
+            lprint(ll.INFO,  f"Removed invalid samples, remaining: {len(X)}")
         
         X = np.clip(X, -1e10, 1e10)
         y = np.clip(y, -1e10, 1e10)
@@ -105,10 +104,10 @@ class DataValidator:
         if check_outliers:
             z_scores = np.abs((X - np.mean(X, axis=0)) / (np.std(X, axis=0) + 1e-10))
             if np.any(z_scores > 5):
-                logger.warning("Detected potential outliers in X (z-score > 5)")
+                lprint(ll.WARN,  "Detected potential outliers in X (z-score > 5)")
         
         corr_matrix = np.corrcoef(X, rowvar=False)
         if np.any(np.abs(corr_matrix - np.eye(corr_matrix.shape[0])) > 0.95):
-            logger.warning("High correlation (>0.95) detected between some features")
+            lprint(ll.WARN,  "High correlation (>0.95) detected between some features")
         
         return X, y

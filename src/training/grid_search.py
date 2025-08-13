@@ -7,8 +7,7 @@ import logging
 
 from src.utils.validators import ConfigValidator
 from src.utils.activations import validate_activations
-
-logger = logging.getLogger('RPropMLP')
+from src.utils.logging import lprint, LoggingLevels as ll
 
 def generate_grid_combinations(grid_search_config: Dict[str, Any], output_dir: Path) -> List[Tuple]:
     for param_list in ['learning_rates', 'batch_sizes', 'hidden_layers', 'activations']:
@@ -47,7 +46,7 @@ def generate_grid_combinations(grid_search_config: Dict[str, Any], output_dir: P
         max_combinations = grid_search_config['max_combinations']
         grid_params = random.sample(grid_params, min(max_combinations, len(grid_params)))
     
-    logger.info(f"Generated {len(grid_params)} parameter combinations for grid search")
+    lprint(ll.INFO,  f"Generated {len(grid_params)} parameter combinations for grid search")
     
     output_dir.mkdir(parents=True, exist_ok=True)
     combinations_file = output_dir / 'grid_combinations.yaml'
@@ -65,7 +64,7 @@ def generate_grid_combinations(grid_search_config: Dict[str, Any], output_dir: P
     ]
     with combinations_file.open('w') as f:
         yaml.safe_dump(combinations_list, f)
-    logger.info(f"Grid search combinations saved to {combinations_file}")
+    lprint(ll.INFO,  f"Grid search combinations saved to {combinations_file}")
     
     return grid_params
 

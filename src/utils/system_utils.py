@@ -8,7 +8,7 @@ from typing import Dict
 from pathlib import Path
 import logging
 from typing import Optional
-
+from src.utils.logging import lprint, LoggingLevels as ll
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -34,22 +34,22 @@ def monitor_memory() -> Dict[str, float]:
         }
     except psutil.Error as e:
         logger = logging.getLogger('RPropMLP')
-        logger.warning(f"Memory monitoring failed: {str(e)}")
+        lprint(ll.WARN,  f"Memory monitoring failed: {str(e)}")
         return {'rss_gb': -1, 'vms_gb': -1, 'percent': -1}
     
 
-def setup_device(logger: logging.LoggerAdapter, device: Optional[torch.device] = torch.device('cpu')) -> torch.device:
+def setup_device(device: Optional[torch.device] = torch.device('cpu')) -> torch.device:
     """Set up the computation device (CPU or GPU)."""
     if not device:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type == 'cuda':
         try:
             total_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-            logger.info(f"Using GPU: {torch.cuda.get_device_name()}, Memory: {total_memory:.1f} GB")
+            lprint(ll.INFO,  f"Using GPU: {torch.cuda.get_device_name()}, Memory: {total_memory:.1f} GB")
         except RuntimeError as e:
-            logger.warning(f"GPU detection failed: {str(e)}. Falling back to CPU.")
+            lprint(ll.WARN,  f"GPU detection failed: {str(e)}. Falling back to CPU.")
             device = torch.device('cpu')
-    logger.info(f"Using device: {device}")
+    lprint(ll.INFO,  f"Using device: {device}")
     return device
 
 def remove_dir(path:Path):
@@ -57,5 +57,5 @@ def remove_dir(path:Path):
         shutil.rmtree(path)
 
 def signal_handler(sig, frame):
-        print("Received interrupt signal, shutting down")
-        raise SystemExit("Terminated by signal")
+    lprint(ll.EXIT, "Received interrupt signal, shutting down")
+    raise SystemExit()

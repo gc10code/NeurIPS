@@ -10,8 +10,7 @@ from src.config.model_config import ModelConfig, FusionConfig
 from src.config.config_manager import ConfigManager
 from src.models.rprop_mlp import RPropMLP
 import traceback
-
-logger = logging.getLogger('RPropMLP')
+from src.utils.logging import lprint, LoggingLevels as ll
 
 class ResultsManager:
     """Manages saving and organizing training results."""
@@ -54,9 +53,9 @@ class ResultsManager:
                         wmae = fold_result['metrics']['wmae']
                         formatted_line = f"{p_idx}\t{f_idx}\t{mse}\t{mae}\t{r2}\t{wmae}\n"
                         f.write(formatted_line)                    
-            logger.debug(f"Fold results saved to {file_path}")
+            lprint(ll.DEBUG, f"Fold results saved to {file_path}")
         except Exception as e:
-            logger.error(f"Failed to save fold results to {file_path}: {str(e)}")
+            lprint(ll.ERROR,  f"Failed to save fold results to {file_path}: {str(e)}")
             raise IOOperationError(f"Failed to save fold results to {file_path}: {str(e)}")
 
         
@@ -65,15 +64,16 @@ class ResultsManager:
         """Save the best model"""
         try:
             # Ensure output directory exists
+            output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
             best_result_file = output_dir / 'best_model.pth'
             
             torch.save(model.state_dict(), best_result_file)
-            logger.info(f"Best model saved to {best_result_file}")
+            lprint(ll.INFO, f"Best model saved to {best_result_file}")
 
         except Exception as e:
             error_msg = f"Failed to save best model to {best_result_file}: {str(e)}"
-            logger.error(error_msg)
+            lprint(ll.ERROR,  f"{error_msg}")
             raise
 
     @staticmethod
@@ -85,7 +85,7 @@ class ResultsManager:
             return model
         except (IOError, PermissionError) as e:
             error_msg = f"Failed to save best result to {model_path}: {str(e)}"
-            logger.error(error_msg)
+            lprint(ll.ERROR,  f"{error_msg}")
             raise IOOperationError(error_msg)
         
     @staticmethod
@@ -93,7 +93,7 @@ class ResultsManager:
         """Select the best model based on validation loss."""
         try:
             if not fold_results:
-                logger.error("Empty fold results list provided")
+                lprint(ll.ERROR,  "Empty fold results list provided")
                 raise ValueError("Fold results list is empty")
                 
             best_model = None
@@ -103,15 +103,15 @@ class ResultsManager:
                 if loss < best_loss:
                     best_loss = loss
                     best_model = result['model']
-                    logger.debug(f"Found better model with validation loss: {best_loss:.4f}")
+                    lprint(ll.DEBUG, f"Found better model with validation loss: {best_loss:.4f}")
             
             if best_model is None:
-                logger.error("No valid model found in fold results")
+                lprint(ll.ERROR,  "No valid model found in fold results")
                 raise ValueError("No valid model found")
                 
-            logger.info(f"Selected best model with validation loss: {best_loss:.4f}")
+            lprint(ll.INFO, f"Selected best model with validation loss: {best_loss:.4f}")
             return best_model
         except Exception as e:
-            logger.error(f"Error in best_model_selection: {str(e)}")
-            logger.debug(f"Stack trace: {traceback.format_exc()}")
+            lprint(ll.ERROR,  f"Error in best_model_selection: {str(e)}")
+            lprint(ll.DEBUG, f"Stack trace: {traceback.format_exc()}")
             raise

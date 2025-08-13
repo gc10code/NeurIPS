@@ -9,9 +9,9 @@ from src.models.rprop_mlp import RPropMLP
 from src.utils.normalizer import DataNormalizer
 from torch.utils.data import DataLoader
 from src.utils.system_utils import setup_device
+from src.utils.logging import lprint, LoggingLevels as ll
 
-logger = logging.getLogger('RPropMLP')
-device = setup_device(logger)
+device = setup_device()
 
 # Function to compute wMAE weights based on the contest formula
 def compute_wmae_weights(true_targets: List[torch.Tensor]) -> torch.Tensor:
@@ -98,11 +98,11 @@ def evaluate_model(model: RPropMLP, data_loader: DataLoader, device: torch.devic
                 elif metric == 'std_error':
                     result_metrics['std_error'] = np.std(y_true - y_pred)
             except Exception as e:
-                logger.warning(f"Failed to compute metric {metric}: {str(e)}")
+                lprint(ll.WARN,  f"Failed to compute metric {metric}: {str(e)}")
                 result_metrics[metric] = float('nan')
         
         return result_metrics
     
     except Exception as e:
-        logger.error(f"Model evaluation failed: {str(e)}")
+        lprint(ll.ERROR,  f"Model evaluation failed: {str(e)}")
         raise

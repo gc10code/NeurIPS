@@ -1,5 +1,5 @@
 # src/utils/__init__.py
-from .logging import setup_logging, log_queue
+from .logging import lprint
 from .validators import ConfigValidator, DataValidator
 from .normalizer import DataNormalizer
 from .early_stopping import EarlyStopping

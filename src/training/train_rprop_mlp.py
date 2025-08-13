@@ -4,7 +4,6 @@ import torch.optim as optim
 import numpy as np
 from copy import deepcopy
 from typing import Tuple, Dict, Any, Optional, List
-import logging
 import gc
 import os, time
 from pathlib import Path
@@ -22,21 +21,20 @@ from src.utils.exceptions import TrainingError
 from src.utils.normalizer import DataNormalizer
 from src.training.data_preparation import create_data_loaders
 from src.training.results_manager import ResultsManager
-from src.utils.logging import setup_logging
 from src.utils.system_utils import *
 from src.training.data_preparation import *
 from src.utils.exceptions import MLPError
 from src.config.config_manager import ConfigManager
 from src.config.grid_search_config import generate_bayesian_search
+from src.utils.logging import lprint, LoggingLevels as ll
 
-logger = setup_logging(log_dir="logs")
 
 
 def create_model(config: ModelConfig, input_size: int, hidden_layers: List[int], 
                  activations: List[str], device: torch.device) -> RPropMLP:
     """Create and initialize an RPropMLP model."""
     try:
-        logger.debug(f"Creating RPropMLP model with input_size={input_size}, hidden_layers={hidden_layers}, "
+        lprint(ll.DEBUG,  f"Creating RPropMLP model with input_size={input_size}, hidden_layers={hidden_layers}, "
                      f"activations={activations}")
         model = RPropMLP(
             input_size=input_size,
@@ -47,10 +45,10 @@ def create_model(config: ModelConfig, input_size: int, hidden_layers: List[int],
             batch_norm=config.batch_norm,
             problem_type=config.problem_type
         ).to(device)
-        logger.info("RPropMLP model created successfully")
+        lprint(ll.INFO,  "RPropMLP model created successfully")
         return model
     except Exception as e:
-        logger.error(f"Failed to create model: {str(e)}")
+        lprint(ll.ERROR,  f"Failed to create model: {str(e)}")
         raise TrainingError(f"Failed to create model: {str(e)}")
 
 def train_epoch(model: RPropMLP, train_loader: torch.utils.data.DataLoader, optimizer: torch.optim.Optimizer, 
@@ -75,7 +73,7 @@ def train_epoch(model: RPropMLP, train_loader: torch.utils.data.DataLoader, opti
             loss = criterion(outputs, batch_y)
             
             if torch.isnan(loss):
-                logger.error("NaN loss detected during training")
+                lprint(ll.ERROR,  "NaN loss detected during training")
                 raise TrainingError("NaN loss detected during training")
             
             loss.backward()
@@ -87,10 +85,10 @@ def train_epoch(model: RPropMLP, train_loader: torch.utils.data.DataLoader, opti
             train_losses.append(loss.item())
         
         avg_loss = np.mean(train_losses)
-        logger.debug(f"Epoch training completed, average loss: {avg_loss:.6f}")
+        lprint(ll.DEBUG,  f"Epoch training completed, average loss: {avg_loss:.6f}")
         return avg_loss
     except Exception as e:
-        logger.error(f"Training epoch failed: {str(e)}")
+        lprint(ll.ERROR,  f"Training epoch failed: {str(e)}")
         raise TrainingError(f"Training epoch failed: {str(e)}")
 
 def validate_epoch(model: RPropMLP, val_loader: torch.utils.data.DataLoader, criterion: nn.Module, 
@@ -114,10 +112,10 @@ def validate_epoch(model: RPropMLP, val_loader: torch.utils.data.DataLoader, cri
                 val_losses.append(val_loss)
         
         avg_val_loss = np.mean(val_losses)
-        logger.debug(f"Epoch validation completed, average loss: {avg_val_loss:.6f}")
+        lprint(ll.DEBUG,  f"Epoch validation completed, average loss: {avg_val_loss:.6f}")
         return avg_val_loss
     except Exception as e:
-        logger.error(f"Validation epoch failed: {str(e)}")
+        lprint(ll.ERROR,  f"Validation epoch failed: {str(e)}")
         raise TrainingError(f"Validation epoch failed: {str(e)}")
 
 def train_model(model: RPropMLP, 
@@ -134,13 +132,13 @@ def train_model(model: RPropMLP,
         delta_max = config.max_delta
         
         if not (0 < delta_minus < 1 < delta_plus):
-            logger.error(f"Invalid RProp parameters: delta_minus={delta_minus} not in (0,1) or delta_plus={delta_plus} <= 1")
+            lprint(ll.ERROR,  f"Invalid RProp parameters: delta_minus={delta_minus} not in (0,1) or delta_plus={delta_plus} <= 1")
             raise TrainingError(f"Invalid RProp: delta_minus={delta_minus} ∉ (0,1) or delta_plus={delta_plus} ≤ 1")
         if not (0 < delta_min < delta_max):
-            logger.error(f"Invalid RProp parameters: delta_min={delta_min} >= delta_max={delta_max}")
+            lprint(ll.ERROR,  f"Invalid RProp parameters: delta_min={delta_min} >= delta_max={delta_max}")
             raise TrainingError(f"Invalid RProp: delta_min={delta_min} >= delta_max={delta_max}")
         
-        logger.info(f"RProp parameters: δ+={delta_plus:.3f}, δ-={delta_minus:.3f}, "
+        lprint(ll.INFO,  f"RProp parameters: δ+={delta_plus:.3f}, δ-={delta_minus:.3f}, "
                    f"δ_min={delta_min:.6f}, δ_max={delta_max:.3f}")
         
         optimizer = torch.optim.Rprop(
@@ -181,23 +179,23 @@ def train_model(model: RPropMLP,
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_model_state = model.state_dict().copy()
-                logger.debug(f"New best validation loss: {best_val_loss:.6f} at epoch {epoch+1}")
+                lprint(ll.DEBUG,  f"New best validation loss: {best_val_loss:.6f} at epoch {epoch+1}")
             
             if (epoch + 1) % ConfigManager.LOGGING_EPOCHS == 0 or epoch == 0:
                 epoch_time = time.time() - epoch_start
                 memory = monitor_memory()
-                logger.info(f"Param_{log_info[0]} Fold_{log_info[1]} "
+                lprint(ll.INFO,  f"Param_{log_info[0]} Fold_{log_info[1]} "
                            f"Epoch {epoch+1:4d}/{config.max_epochs}: "
                            f"Train={train_loss:.6f}, Val={val_loss:.6f}, "
                            f"GradNorm={history['grad_norm'][-1]:.4f}, LR={history['learning_rate'][-1]:.6f}, "
                            f"Time={epoch_time:.2f}s, Mem={memory['rss_gb']:.1f}GB")
             
             if early_stopping(val_loss):
-                logger.info(f"Early stopping at epoch {epoch+1}")
+                lprint(ll.INFO,  f"Early stopping at epoch {epoch+1}")
                 break
             
             if val_loss < config.target_error:
-                logger.info(f"Target error {config.target_error} reached at epoch {epoch+1}")
+                lprint(ll.INFO,  f"Target error {config.target_error} reached at epoch {epoch+1}")
                 break
             
             if (epoch + 1) % config.memory_check_interval == 0:
@@ -209,22 +207,21 @@ def train_model(model: RPropMLP,
             model.load_state_dict(best_model_state)
         
         total_time = time.time() - start_time
-        logger.info(f"Training completed in {total_time:.2f}s, best val_loss: {best_val_loss:.6f}")
+        lprint(ll.INFO,  f"Training completed in {total_time:.2f}s, best val_loss: {best_val_loss:.6f}")
         
         return model, best_val_loss, history
     except Exception as e:
-        logger.error(f"Training failed: {str(e)}")
+        lprint(ll.ERROR,  f"Training failed: {str(e)}")
         raise TrainingError(f"Training failed: {str(e)}")
 
 def train_fold(args: Tuple[int, int, Tuple, np.ndarray, np.ndarray, ModelConfig, torch.device]) -> Dict[str, Any]:
     fold, param_idx, grid_params, X_norm, y_norm, config, device = args
     lr, batch_size, hidden_layers, activation, delta_plus, delta_minus, delta_min, delta_max = grid_params
     
-    logger = logging.getLogger('RPropMLP')
-    logger_prefix = logging.LoggerAdapter(logger, extra={'fold': f'Fold {fold + 1}', 'param_idx': f'Params {param_idx}'})
+    prefix = f'Params_{param_idx} Fold_{fold + 1} - '
     
     try:
-        logger_prefix.info(f"Starting fold {fold + 1} with lr={lr}, batch_size={batch_size}, "
+        lprint(ll.INFO, prefix +f"Starting with: lr={lr}, batch_size={batch_size}, "
                          f"hidden_layers={hidden_layers}, activation={activation}, "
                          f"δ+={delta_plus}, δ-={delta_minus}, δ_min={delta_min}, δ_max={delta_max}")
         
@@ -247,7 +244,7 @@ def train_fold(args: Tuple[int, int, Tuple, np.ndarray, np.ndarray, ModelConfig,
         train_loader, val_loader = create_data_loaders(config, X_norm, y_norm, batch_size, fold)
         
         model = create_model(config, X_norm.shape[1], hidden_layers, activation, device)
-        logger_prefix.info(f"Model parameters: {model.get_num_parameters()}")
+        lprint(ll.INFO, prefix +f"Model parameters: {model.get_num_parameters()}")
         
         model, val_loss, history = train_model(model, train_loader, val_loader, config, device, (param_idx, fold + 1))
         
@@ -272,17 +269,17 @@ def train_fold(args: Tuple[int, int, Tuple, np.ndarray, np.ndarray, ModelConfig,
             'model': model
         }
         
-        logger_prefix.info(f"Fold {fold + 1} completed with val_loss: {val_loss:.6f}")
+        lprint(ll.INFO, prefix +f"Fold {fold + 1} completed with val_loss: {val_loss:.6f}")
         return fold_results
     except Exception as e:
-        logger_prefix.error(f"Training failed for fold {fold + 1}, params {param_idx}: {str(e)}", exc_info=True)
+        lprint(ll.ERROR, prefix +f"Training failed for fold {fold + 1}, params {param_idx}: {str(e)}", exc_info=True)
         return None
 
 def create_tasks(config: ModelConfig, params: Tuple, X_norm: torch.Tensor, 
                 y_norm: torch.Tensor, device: torch.device, param_idx: int) -> List[Tuple]:
     """Create tasks for K-fold cross-validation or split training for a single parameter set."""
     try:
-        logger.debug(f"Creating tasks for param_idx {param_idx}")
+        lprint(ll.DEBUG,  f"Creating tasks for param_idx {param_idx}")
         tasks = []
         output_dir = Path(config.output_dir)
         
@@ -318,76 +315,78 @@ def create_tasks(config: ModelConfig, params: Tuple, X_norm: torch.Tensor,
                 tasks.append((fold, param_idx, (lr, batch_size, hidden_layers, [activation] * len(hidden_layers), 
                                               delta_plus, delta_minus, delta_min, delta_max), X_norm, y_norm, task_config, device))
         
-        logger.debug(f"Created {len(tasks)} tasks for param_idx {param_idx}")
+        lprint(ll.DEBUG,  f"Created {len(tasks)} tasks for param_idx {param_idx}")
         return tasks
     except Exception as e:
-        logger.error(f"Error creating tasks: {str(e)}")
+        lprint(ll.ERROR,  f"Error creating tasks: {str(e)}")
         raise
 
 def run_training(tasks: List[Tuple], use_multiprocessing: bool = True) -> List[Dict]:
     """Run training tasks, with optional multiprocessing."""
     try:
-        logger.debug(f"Multiprocessing start method: {mp.get_start_method()}")
+        lprint(ll.DEBUG,  f"Multiprocessing start method: {mp.get_start_method()}")
         if use_multiprocessing:
             try:
-                mp.set_start_method('fork', force=True)
-                logger.debug(f"Set multiprocessing start method to 'fork'")
+                mp.set_start_method('spawn', force=True)
+                lprint(ll.DEBUG,  f"Set multiprocessing start method to 'spawn'")
             except RuntimeError as e:
-                logger.warning(f"Failed to set start method to 'fork': {str(e)}. Using default method.")
+                lprint(ll.WARN,  f"Failed to set start method to 'spawn': {str(e)}. Using default method.")
+                mp.set_start_method('fork', force=True)
+                lprint(ll.DEBUG,  f"Set multiprocessing start method to 'fork'")
             num_processes = min(4, mp.cpu_count(), len(tasks))  # Limit to 4 processes
-            logger.debug(f"Starting multiprocessing with {num_processes} workers")
+            lprint(ll.DEBUG,  f"Starting multiprocessing with {num_processes} workers")
             pool = mp.Pool(processes=num_processes)
             try:
                 results = pool.map(train_fold, tasks)
-                logger.info("Multiprocessing completed successfully")
+                lprint(ll.INFO,  "Multiprocessing completed successfully")
             finally:
                 pool.close()
                 pool.join()
-                logger.debug("Multiprocessing pool closed and joined")
+                lprint(ll.DEBUG,  "Multiprocessing pool closed and joined")
         else:
-            logger.info("Running in single-threaded mode")
+            lprint(ll.INFO,  "Running in single-threaded mode")
             results = []
             for task in tasks:
                 try:
                     result = train_fold(task)
                     results.append(result)
-                    logger.debug(f"Completed task: {task}")
+                    lprint(ll.DEBUG,  f"Completed task: {task}")
                 except Exception as e:
-                    logger.error(f"Failed to process task {task}: {str(e)}")
+                    lprint(ll.ERROR,  f"Failed to process task {task}: {str(e)}")
         return [r for r in results if r is not None]
     except Exception as e:
-        logger.warning(f"Multiprocessing failed: {str(e)}. Falling back to single-threaded execution.")
-        logger.debug("Starting single-threaded execution for all tasks")
+        lprint(ll.WARN,  f"Multiprocessing failed: {str(e)}. Falling back to single-threaded execution.")
+        lprint(ll.DEBUG,  "Starting single-threaded execution for all tasks")
         results = []
         for task in tasks:
             try:
                 result = train_fold(task)
                 results.append(result)
-                logger.debug(f"Completed task: {task}")
+                lprint(ll.DEBUG,  f"Completed task: {task}")
             except Exception as e:
-                logger.error(f"Failed to process task {task}: {str(e)}")
-        logger.info(f"Single-threaded execution completed with {len(results)} results")
+                lprint(ll.ERROR,  f"Failed to process task {task}: {str(e)}")
+        lprint(ll.INFO,  f"Single-threaded execution completed with {len(results)} results")
         return [r for r in results if r is not None]
 
 def objective(params: List, config: ModelConfig, X_norm: torch.Tensor, y_norm: torch.Tensor, 
               device: torch.device, output_dir: Path, param_idx: int, log_file: Path) -> float:
     """Objective function for Bayesian optimization."""
     try:
-        logger.info(f"Evaluating objective for params {param_idx}: {params}")
+        lprint(ll.SUCCESS,  f"Evaluating params {param_idx}: {params}")
         tasks = create_tasks(config, params, X_norm, y_norm, device, param_idx)
         fold_results = run_training(tasks, use_multiprocessing=True)
         
         if not fold_results:
-            logger.warning(f"No valid results for params {params}, returning high loss")
+            lprint(ll.WARN,  f"No valid results for params {params}, returning high loss")
             with open(log_file, "a") as f:
                 f.write(f"Index: {param_idx}, Input: {params}, Reason: No valid results\n")
             return ConfigManager.START_MAX_LOSS_VAL
         
         mean_val_loss = np.mean([r['val_loss'] for r in fold_results])
-        logger.info(f"Evaluated params {param_idx}: {params}, mean val_loss: {mean_val_loss:.6f}")
+        lprint(ll.REPORT,  f"Evaluated params {param_idx}: {params}, mean val_loss: {mean_val_loss:.6f}")
         
         if np.isnan(mean_val_loss) or np.isinf(mean_val_loss) or abs(mean_val_loss) > 1e10:
-            logger.warning(f"Problematic loss value: {mean_val_loss}")
+            lprint(ll.WARN,  f"Problematic loss value: {mean_val_loss}")
             with open(log_file, "a") as f:
                 f.write(f"Index: {param_idx}, Input: {params}, Problematic output: {mean_val_loss}\n")
             return ConfigManager.START_MAX_LOSS_VAL
@@ -396,47 +395,47 @@ def objective(params: List, config: ModelConfig, X_norm: torch.Tensor, y_norm: t
         return mean_val_loss
     
     except Exception as e:
-        logger.error(f"Objective evaluation failed for params {params}: {str(e)}")
+        lprint(ll.ERROR,  f"Objective evaluation failed for params {params}: {str(e)}")
         with open(log_file, "a") as f:
             f.write(f"Index: {param_idx}, Input: {params}, Exception: {str(e)}\n")
         return ConfigManager.START_MAX_LOSS_VAL
 
-def rprop_mlp_main(config: ModelConfig, X: np.ndarray, y: np.ndarray, use_multiprocessing: bool = True, max_combinations: int = 100) -> Dict[str, Any]:
+def rprop_mlp_main(target:str, config: ModelConfig, X: np.ndarray, y: np.ndarray, use_multiprocessing: bool = True, max_combinations: int = 100) -> Dict[str, Any]:
     start_time = time.time()
-    logger.info(f"=== RProp MLP Bayesian Optimization Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    lprint(ll.INFO,  f"=== RProp MLP Bayesian Optimization Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
         if np.any(np.isnan(X)) or np.any(np.isinf(X)):
-            logger.warning("Input dataset X contains NaN or inf values. Cleaning dataset.")
+            lprint(ll.WARN,  "Input dataset X contains NaN or inf values. Cleaning dataset.")
             X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
         if np.any(np.isnan(y)) or np.any(np.isinf(y)):
-            logger.warning("Input dataset y contains NaN or inf values. Cleaning dataset.")
+            lprint(ll.WARN,  "Input dataset y contains NaN or inf values. Cleaning dataset.")
             y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
         
         var = np.var(X, axis=0)
         valid_features = var > 0
         if not np.all(valid_features):
-            logger.warning(f"Removing {np.sum(~valid_features)} features with zero variance.")
+            lprint(ll.WARN,  f"Removing {np.sum(~valid_features)} features with zero variance.")
             X = X[:, valid_features]
         
         check_pytorch_version()
         set_seed(config.seed)
-        logger.info(f"Random seed set to {config.seed}")
+        lprint(ll.INFO,  f"Random seed set to {config.seed}")
         
-        device = setup_device(logger=logger)
+        device = setup_device()
         X_norm, y_norm, normalizer = prepare_data(config, X, y)
-        logger.info(f"Data normalized: X shape {X_norm.shape}, y shape {y_norm.shape}")
+        lprint(ll.INFO,  f"Data normalized: X shape {X_norm.shape}, y shape {y_norm.shape}")
         
         output_dir = Path(config.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         ConfigManager.save_config(config, output_dir)
         
-        bayesian_config, report = generate_bayesian_search(X_norm, problem_type=config.problem_type, max_combinations=max_combinations, logger=logger)
+        bayesian_config, report = generate_bayesian_search(X_norm, problem_type=config.problem_type, max_combinations=max_combinations)
         ConfigManager.save_bayesian_search(bayesian_config, report, output_dir)
-        logger.info(f"Bayesian search configuration saved to {output_dir / 'bayesian_search.pkl'}")
+        lprint(ll.REPORT,  f"Bayesian search configuration saved to {output_dir / 'bayesian_search.pkl'}")
         
         search_space = [
             Real(bayesian_config['learning_rate']['range'][0], bayesian_config['learning_rate']['range'][1], name='learning_rate'),
@@ -457,6 +456,7 @@ def rprop_mlp_main(config: ModelConfig, X: np.ndarray, y: np.ndarray, use_multip
             param_idx_counter[0] += 1
             return objective(params, config, X_norm, y_norm, device, output_dir, param_idx_counter[0], log_file=log_file)
         
+        lprint(ll.SUCCESS,  f"Bayesian Optimization started")
         result = gp_minimize(
             objective_wrapper,
             search_space,
@@ -466,6 +466,7 @@ def rprop_mlp_main(config: ModelConfig, X: np.ndarray, y: np.ndarray, use_multip
         )
         
         n_features = X_norm.shape[1]
+        
         best_params = {
             'learning_rate': result.x[0],
             'batch_size': result.x[1],
@@ -478,30 +479,30 @@ def rprop_mlp_main(config: ModelConfig, X: np.ndarray, y: np.ndarray, use_multip
         }
         best_val_loss = result.fun
         
-        logger.info(f"\n=== Bayesian Optimization Completed ===")
-        logger.info(f"Best parameters: {best_params}")
-        logger.info(f"Best validation loss: {best_val_loss:.6f}")
-        logger.info(f"Total training time: {time.time()-start_time:.2f}s")
+        lprint(ll.SUCCESS,  f"Bayesian Optimization Completed")
+        lprint(ll.SUCCESS,  f"Best parameters: {best_params}")
+        lprint(ll.SUCCESS,  f"Best validation loss: {best_val_loss:.6f}")
+        lprint(ll.SUCCESS,  f"Total training time: {time.time()-start_time:.2f}s")
         report.append(f"Best parameters: {best_params}")
         report.append(f"Best validation loss: {best_val_loss:.6f}")
         
         # Retraining of final model
-        logger.info(f"\n=== Retraining of best params model ===")
+        lprint(ll.SUCCESS,  f"Retraining of best params model")
         final_config = ConfigManager.create_default_config("rprop")
-        final_config = ConfigManager.update_config(final_config, best_params.values()) 
-        final_params = ConfigManager.get_params(final_config)        
+        final_config = ConfigManager.update_config(final_config, best_params.values())
+        final_params = result.x    
         final_tasks = create_tasks(final_config, final_params, X_norm, y_norm, device, 1)
         final_fold_results = run_training(final_tasks, use_multiprocessing=False)  # Disable multiprocessing for stability
         final_model = ResultsManager.best_model_selection(final_fold_results)
-        ResultsManager.save_best_model(final_model, final_config.output_dir) 
-        logger.info("Final model retraining completed and saved")
+        ResultsManager.save_best_model(final_model, Path(final_config.output_dir) / target) 
+        lprint(ll.REPORT,  f"Final model retraining completed and saved in {final_config.output_dir}")
         return final_model
     
     except MLPError as e:
-        logger.error(f"Main function failed: {str(e)}")
+        lprint(ll.ERROR,  f"Main function failed: {str(e)}")
         raise
     except Exception as e:
-        logger.error(f"Unexpected error in main function: {str(e)}", exc_info=True)
+        lprint(ll.ERROR,  f"Unexpected error in main function: {str(e)}", exc_info=True)
         raise
     finally:
         gc.collect()

@@ -1,14 +1,12 @@
 from pathlib import Path
 import yaml, json, pickle
-import logging
 from typing import Dict, Any, List, Tuple, Union
 from datetime import datetime
 from skopt.space import Real, Integer, Categorical
 
 from src.config.model_config import ModelConfig, FusionConfig
 from src.utils.exceptions import ConfigurationError
-
-logger = logging.getLogger('RPropMLP')
+from src.utils.logging import lprint, LoggingLevels as ll
 
 class ConfigManager:
     """Manages configuration loading, saving, and validation."""
@@ -36,7 +34,7 @@ class ConfigManager:
             config_path = output_path / 'config.yaml'
             with config_path.open('w') as f:
                 yaml.safe_dump(config.__dict__, f, default_flow_style=False)
-            logger.info(f"Configuration saved to {config_path}")
+            lprint(ll.INFO,  f"Configuration saved to {config_path}")
         except (IOError, PermissionError) as e:
             raise ConfigurationError(f"Failed to save configuration to {output_path}: {str(e)}")
 
@@ -50,7 +48,7 @@ class ConfigManager:
                 config_dict = yaml.safe_load(f)
             from ..utils.validators import ConfigValidator
             ConfigValidator.validate_config(config_dict)
-            logger.info(f"Configuration loaded from {config_path}")
+            lprint(ll.INFO,  f"Configuration loaded from {config_path}")
             return config_dict
         except (yaml.YAMLError, PermissionError) as e:
             raise ConfigurationError(f"Failed to load configuration from {config_path}: {str(e)}")
@@ -82,13 +80,13 @@ class ConfigManager:
             }
             with open(pickle_path, 'wb') as f:
                 pickle.dump(data_to_save, f)
-            logger.info(f"Bayesian search configuration saved to {pickle_path}")
+            lprint(ll.INFO,  f"Bayesian search configuration saved to {pickle_path}")
 
         except (IOError, PermissionError) as e:
-            logger.error(f"Failed to save Bayesian search configuration to {pickle_path}: {str(e)}")
+            lprint(ll.ERROR,  f"Failed to save Bayesian search configuration to {pickle_path}: {str(e)}")
             raise ConfigurationError(f"Failed to save Bayesian search configuration to {pickle_path}: {str(e)}")
         except Exception as e:
-            logger.error(f"Unexpected error while saving Bayesian search configuration: {str(e)}")
+            lprint(ll.ERROR,  f"Unexpected error while saving Bayesian search configuration: {str(e)}")
             raise ConfigurationError(f"Unexpected error while saving Bayesian search configuration: {str(e)}")
 
     @staticmethod
@@ -108,10 +106,10 @@ class ConfigManager:
         try:
             with open(pickle_path, 'rb') as f:
                 data = pickle.load(f)
-            logger.info(f"Bayesian search configuration loaded from {pickle_path}")
+            lprint(ll.INFO,  f"Bayesian search configuration loaded from {pickle_path}")
             return data["bayesian_search_config"], data["report"]
         except (IOError, PermissionError, pickle.PickleError) as e:
-            logger.error(f"Failed to load Bayesian search configuration from {pickle_path}: {str(e)}")
+            lprint(ll.ERROR,  f"Failed to load Bayesian search configuration from {pickle_path}: {str(e)}")
             raise ConfigurationError(f"Failed to load Bayesian search configuration from {pickle_path}: {str(e)}")
     
     @staticmethod

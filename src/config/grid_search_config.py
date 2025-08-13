@@ -79,12 +79,6 @@ def generate_bayesian_search(X: TensorLike, problem_type: str = 'regression', ma
     feature_sample_ratio = n_features / max(1, n_samples)
     mean_corr, eig_spread = _compute_correlation_metrics(X_np, logger)
 
-    report.append(f"Dataset: {n_samples} samples, {n_features} features.")
-    report.append(f"Mean feature variance: {feature_var:.4f}")
-    report.append(f"Sparsity: {sparsity:.4f}")
-    report.append(f"Feature/Sample ratio: {feature_sample_ratio:.4f}")
-    report.append(f"Mean feature correlation: {mean_corr:.4f}, Eigenvalue spread: {eig_spread:.4f}")
-
     # Learning rate
     lr_range = [1e-4, 1e-1]
     if feature_sample_ratio < 10:
@@ -143,10 +137,10 @@ def generate_bayesian_search(X: TensorLike, problem_type: str = 'regression', ma
     report.append(f"Depth range: {depth_range}, Decay factor range: {decay_factor_range}")
 
     # Activations
-    activation_range = ['relu', 'gelu', 'swish']
-    if problem_type == 'classification':
-        activation_range.append('selu')
-        report.append("Classification problem → added SELU to activation range.")
+    if problem_type == 'regression':
+        activation_range = ['relu', 'leaky_relu', 'prelu', 'mish', 'gelu', 'swish', 'selu']
+    elif problem_type == 'classification':
+        activation_range = ['sigmoid', 'linear']
 
     # RProp parameters
     delta_plus_range = [1.0, 1.3] if sparsity < 0.5 else [1.0, 1.2]
