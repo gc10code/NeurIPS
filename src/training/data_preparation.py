@@ -8,6 +8,22 @@ from src.utils.validators import DataValidator
 from src.config.model_config import ModelConfig
 from src.utils.exceptions import DataError
 from src.utils.logging import lprint, LoggingLevels as ll
+from src.preprocessing.fusion_dataset import DynamicFusionDataset
+
+def clean_datasets (X:np.ndarray, y: np.ndarray):
+    if np.any(np.isnan(X)) or np.any(np.isinf(X)):
+        lprint(ll.WARN,  "Input dataset X contains NaN or inf values. Cleaning dataset.")
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    if np.any(np.isnan(y)) or np.any(np.isinf(y)):
+        lprint(ll.WARN,  "Input dataset y contains NaN or inf values. Cleaning dataset.")
+        y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+    var = np.var(X, axis=0)
+    valid_features = var > 0
+    if not np.all(valid_features):
+        lprint(ll.WARN,  f"Removing {np.sum(~valid_features)} features with zero variance.")
+        X = X[:, valid_features]
+
+    return X,y
 
 def prepare_data(config: ModelConfig, X: np.ndarray, y: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor, DataNormalizer]:
     """Prepare and normalize input data."""
@@ -23,7 +39,7 @@ def prepare_data(config: ModelConfig, X: np.ndarray, y: np.ndarray) -> Tuple[tor
         lprint(ll.INFO, f"Data prepared: X shape={X_norm.shape}, y shape={y_norm.shape}")
         return X_norm, y_norm, normalizer
     except Exception as e:
-        lprint(ll.ERROR, f"Data preparation failed: {str(e)}", exc_info=True)
+        lprint(ll.ERROR, f"Data preparation failed: {str(e)}")
         raise DataError(f"Data preparation failed: {str(e)}")
 
 def create_data_loaders(config: ModelConfig, X_norm: torch.Tensor, y_norm: torch.Tensor,
@@ -107,5 +123,24 @@ def create_data_loaders(config: ModelConfig, X_norm: torch.Tensor, y_norm: torch
         lprint(ll.INFO, f"DataLoaders created: {len(train_loader)} train batches, {len(val_loader)} validation batches")
         return train_loader, val_loader
     except Exception as e:
-        lprint(ll.ERROR, f"Failed to create data loaders: {str(e)}", exc_info=True)
+        lprint(ll.ERROR, f"Failed to create data loaders: {str(e)}")
         raise DataError(f"Failed to create data loaders: {str(e)}")
+    
+
+def create_dataloader(metadata_file: str, descriptor_files: list[str], targets: list[str], batch_size: int, 
+                      shuffle: bool = True, num_workers: int = 4, pin_memory: bool = True) -> DataLoader:
+    lprint(ll.INFO, "Creating DataLoader")
+    try:
+        dataset = DynamicFusionDataset(metadata_file, descriptor_files, targets)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=pin_memory
+        )
+        lprint(ll.INFO, f"DataLoader created with batch_size={batch_size}, shuffle={shuffle}, num_workers={num_workers}")
+        return dataloader
+    except Exception as e:
+        lprint(ll.ERROR, f"Error in create_dataloader: {str(e)}")
+        raise

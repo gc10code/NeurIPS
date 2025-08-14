@@ -1,9 +1,9 @@
 import torch
 import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from typing import Dict, List, Optional
-
-import logging
+from typing import Dict, List, Optional, Tuple
+import numba as nb
+import math
 
 from src.models.rprop_mlp import RPropMLP
 from src.utils.normalizer import DataNormalizer
@@ -13,34 +13,28 @@ from src.utils.logging import lprint, LoggingLevels as ll
 
 device = setup_device()
 
-# Function to compute wMAE weights based on the contest formula
-def compute_wmae_weights(true_targets: List[torch.Tensor]) -> torch.Tensor:
-    # Number of available values for each property (non-NaN values)
-    num_values = [torch.sum(~torch.isnan(target)).item() for target in true_targets]    
-    # Compute value ranges (max - min) for each property
-    ranges = []
-    for target in true_targets:
-        valid_values = target[~torch.isnan(target)]
-        if len(valid_values) > 0:
-            range_t = valid_values.max().item() - valid_values.min().item()
-            ranges.append(range_t if range_t > 0 else 1.0)  # Avoid division by zero
-        else:
-            ranges.append(1.0)  # Default range if no valid values
+import numpy as np
+import pandas as pd
 
-    # Compute unnormalized weights: 1 / (num_values * sqrt(num_values) * range)
-    unnormalized_weights = [
-        1.0 / (n * np.sqrt(n) * r) if n > 0 else 1.0
-        for n, r in zip(num_values, ranges)
-    ]
-    # Normalize weights so their sum equals the number of properties (5)
-    total = sum(unnormalized_weights)
-    weights = [5.0 * w / total if total > 0 else 1.0 / 5.0 for w in unnormalized_weights]
-    return torch.tensor(weights, dtype=torch.float64).to(device)
+def compute_wmae_weights(true_targets: List[Tuple[torch.Tensor, torch.Tensor, int]]) -> torch.Tensor:
+    K = len(true_targets)
+    
+    inverse_sqrt_scales = torch.tensor([1.0 * (target[2] ** 0.5) for target in true_targets])
+    range_norms = torch.tensor([(1.0 / (target[1].max() - target[1].min())) for target in true_targets])
+    weight_normalization = inverse_sqrt_scales.sum()
+    # it is product element * element, not vectorial product!
+    weights = K * range_norms * inverse_sqrt_scales / weight_normalization
+    
+    return weights
 
 # Weighted MAE loss function using contest formula
 def wMAE_loss(predictions: List[torch.Tensor], targets: List[torch.Tensor], weights: torch.Tensor) -> torch.Tensor:
-    mae = sum(w * torch.mean(torch.abs(pred - target)) for w, pred, target in zip(weights, predictions, targets))
-    return mae
+    predictions = torch.stack(predictions)
+    targets = torch.stack(targets)
+    # Compute weighted MAE: sum(weights * |predictions - targets|)
+    wmae = torch.sum(weights.view(-1, 1) * torch.abs(predictions - targets))
+    return wmae
+
 
 def evaluate_model(model: RPropMLP, data_loader: DataLoader, device: torch.device,
                   normalizer: Optional[DataNormalizer] = None,
@@ -83,9 +77,6 @@ def evaluate_model(model: RPropMLP, data_loader: DataLoader, device: torch.devic
                     result_metrics['mae'] = mean_absolute_error(y_true, y_pred)
                 elif metric == 'r2':
                     result_metrics['r2'] = r2_score(y_true, y_pred)
-                elif metric == 'wmae':
-                    weights = torch.ones_like(torch.tensor(y_true))
-                    result_metrics['wmae'] = wMAE_loss(torch.tensor(y_true), torch.tensor(y_pred), weights).item()
                 elif metric == 'mape':
                     if np.mean(np.abs(y_true)) > 1e-10:
                         result_metrics['mape'] = np.mean(np.abs((y_true - y_pred) / (y_true + 1e-10))) * 100

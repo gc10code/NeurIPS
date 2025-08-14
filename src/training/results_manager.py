@@ -50,8 +50,7 @@ class ResultsManager:
                         mae = fold_result['metrics']['mae']
                         mse = fold_result['metrics']['mse']
                         r2 = fold_result['metrics']['r2']
-                        wmae = fold_result['metrics']['wmae']
-                        formatted_line = f"{p_idx}\t{f_idx}\t{mse}\t{mae}\t{r2}\t{wmae}\n"
+                        formatted_line = f"{p_idx}\t{f_idx}\t{mse}\t{mae}\t{r2}\n"
                         f.write(formatted_line)                    
             lprint(ll.DEBUG, f"Fold results saved to {file_path}")
         except Exception as e:
@@ -82,7 +81,7 @@ class ResultsManager:
 
     
     @staticmethod
-    def load_best_model(model_path: Path) -> torch.nn.Module:
+    def load_best_model(model_path: Path) -> RPropMLP:
         try:
             # Load the saved dictionary
             with open(model_path, "rb") as f:

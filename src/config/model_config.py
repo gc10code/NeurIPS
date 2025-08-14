@@ -10,9 +10,9 @@ class ModelConfig:
     training_type: str = 'fold'  # 'fold' or 'split'
     learning_rate: float = 0.01
     batch_size: int = 32
-    max_epochs: int = 5
-    k_folds: int = 2
-    patience: int = 20
+    max_epochs: int = 1000
+    k_folds: int = 5
+    patience: int = 50
     min_delta: float = 1e-6
     max_delta: float = 50.0
     minus_delta: float = 0.5
@@ -20,8 +20,8 @@ class ModelConfig:
     shuffle: bool = True
     target_error: float = 1e-6
     gradient_clipping: float = 1.0
-    input_normalization: str = 'zscore'
-    output_normalization: str = 'zscore'
+    input_normalization: str = 'minmax'
+    output_normalization: str = 'minmax'
     seed: int = 42
     num_workers: int = 4
     pin_memory: bool = True
@@ -67,8 +67,8 @@ class FusionConfig:
     shuffle: bool = True
     target_error: float = 1e-6
     gradient_clipping: float = 1.0
-    input_normalization: str = 'zscore'
-    output_normalization: str = 'zscore'
+    input_normalization: str = 'minmax'
+    output_normalization: str = 'minmax'
     seed: int = 42
     num_workers: int = 4
     pin_memory: bool = True

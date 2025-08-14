@@ -164,3 +164,72 @@ def generate_bayesian_search(X: TensorLike, problem_type: str = 'regression', ma
     }
     report.append(f"Bayesian search space defined: {bayesian_config}")
     return bayesian_config, report
+
+
+from skopt.space import Real, Integer, Categorical
+import torch
+from typing import List
+
+from skopt.space import Real, Integer, Categorical
+import torch
+from typing import List
+
+def generate_bayesian_search_fusion(X: torch.Tensor, y: List[torch.Tensor], teacher_output_sizes: List[int], 
+                            problem_type: str = 'regression', max_combinations: int = 20) -> tuple:
+    """
+    Generate a Bayesian search space tailored to dataset and teacher model characteristics,
+    supporting a variable number of hidden layers.
+    
+    Args:
+        X (torch.Tensor): Input data tensor, shape [n_samples, n_features].
+        y (List[torch.Tensor]): List of target tensors, each with shape [n_samples_i, output_dim].
+        teacher_output_sizes (List[int]): Output sizes of teacher models.
+        problem_type (str): Type of problem ('regression' or 'classification').
+        max_combinations (int): Maximum number of combinations to evaluate.
+    
+    Returns:
+        Tuple: (search_space, report)
+    """
+    # Dataset characteristics
+    n_samples = X.shape[0]  # 556 after truncation
+    n_features = X.shape[1]  # 613 after adjustment
+    n_outputs = len(teacher_output_sizes)  # 5
+    min_samples_per_target = min(y_i.shape[0] for y_i in y)  # 556
+    target_ranges = [float(y_i.max() - y_i.min()) for y_i in y]
+    max_target_range = max(target_ranges) if target_ranges else 1.0
+    target_variances = [float(y_i.var()) for y_i in y]
+    max_variance = max(target_variances) if target_variances else 1.0
+
+    # Search space
+    search_space = [
+        Real(1e-5, 5e-4, name='learning_rate', prior='log-uniform'),
+        Integer(max(8, min_samples_per_target // 20), min(min_samples_per_target // 4, 64), name='batch_size'),
+        Real(0.1, 0.5, name='dropout_prob'),
+        Integer(1, 3, name='num_hidden_layers'),
+        Integer(max(n_features // 8, 64), min(n_features // 2, 256), name='hidden_size1'),
+        Integer(max(n_features // 16, 32), min(n_features // 4, 128), name='hidden_size2'),
+        Integer(max(n_features // 32, 16), min(n_features // 8, 64), name='hidden_size3'),
+        Categorical([0, 1, 2], name='activation_idx'),
+        Real(0.6, 1.0, name='alpha'),
+        Real(0.0, min(0.2 / max_variance, 0.5), name='beta')
+    ]
+
+    # Report per il logging
+    report = (
+        f"Bayesian search space defined with {len(search_space)} dimensions:\n"
+        f"- learning_rate: [{1e-5}, {5e-4}] (log-uniform)\n"
+        f"- batch_size: [{max(8, min_samples_per_target // 20)}, {min(min_samples_per_target // 4, 64)}]\n"
+        f"- dropout_prob: [0.1, 0.5]\n"
+        f"- num_hidden_layers: [1, 3]\n"
+        f"- hidden_size1: [{max(n_features // 8, 64)}, {min(n_features // 2, 256)}]\n"
+        f"- hidden_size2: [{max(n_features // 16, 32)}, {min(n_features // 4, 128)}]\n"
+        f"- hidden_size3: [{max(n_features // 32, 16)}, {min(n_features // 8, 64)}]\n"
+        f"- activation_idx: [0, 1, 2]\n"
+        f"- alpha: [0.6, 1.0]\n"
+        f"- beta: [0.0, {min(0.2 / max_variance, 0.5):.6f}]\n"
+        f"Dataset: n_samples={n_samples}, n_features={n_features}, n_outputs={n_outputs}, "
+        f"min_samples_per_target={min_samples_per_target}, target_ranges={target_ranges}, "
+        f"target_variances={target_variances}"
+    )
+
+    return search_space, report

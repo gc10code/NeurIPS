@@ -28,7 +28,9 @@ from src.config.config_manager import ConfigManager
 from src.config.grid_search_config import generate_bayesian_search
 from src.utils.logging import lprint, LoggingLevels as ll
 
+import numba as nb
 
+normalizer = DataNormalizer("minmax", "minmax")
 
 def create_model(config: ModelConfig, input_size: int, hidden_layers: List[int], 
                  activations: List[str], device: torch.device) -> RPropMLP:
@@ -242,13 +244,13 @@ def train_fold(args: Tuple[int, int, Tuple, np.ndarray, np.ndarray, ModelConfig,
                 activation = activation[:len(hidden_layers)]
                 
         train_loader, val_loader = create_data_loaders(config, X_norm, y_norm, batch_size, fold)
-        
+ 
         model = create_model(config, X_norm.shape[1], hidden_layers, activation, device)
         lprint(ll.INFO, prefix +f"Model parameters: {model.get_num_parameters()}")
         
         model, val_loss, history = train_model(model, train_loader, val_loader, config, device, (param_idx, fold + 1))
         
-        metrics = evaluate_model(model, val_loader, device, normalizer=None)
+        metrics = evaluate_model(model, val_loader, device, normalizer = normalizer)
         
         fold_results = {
             'fold': fold + 1,
@@ -272,7 +274,7 @@ def train_fold(args: Tuple[int, int, Tuple, np.ndarray, np.ndarray, ModelConfig,
         lprint(ll.INFO, prefix +f"Fold {fold + 1} completed with val_loss: {val_loss:.6f}")
         return fold_results
     except Exception as e:
-        lprint(ll.ERROR, prefix +f"Training failed for fold {fold + 1}, params {param_idx}: {str(e)}", exc_info=True)
+        lprint(ll.ERROR, prefix +f"Training failed for fold {fold + 1}, params {param_idx}: {str(e)}")
         return None
 
 def create_tasks(config: ModelConfig, params: Tuple, X_norm: torch.Tensor, 
@@ -400,6 +402,7 @@ def objective(params: List, config: ModelConfig, X_norm: torch.Tensor, y_norm: t
             f.write(f"Index: {param_idx}, Input: {params}, Exception: {str(e)}\n")
         return ConfigManager.START_MAX_LOSS_VAL
 
+
 def rprop_mlp_main(target:str, config: ModelConfig, X: np.ndarray, y: np.ndarray, use_multiprocessing: bool = True, max_combinations: int = 100) -> Dict[str, Any]:
     start_time = time.time()
     lprint(ll.INFO,  f"=== RProp MLP Bayesian Optimization Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
@@ -407,20 +410,7 @@ def rprop_mlp_main(target:str, config: ModelConfig, X: np.ndarray, y: np.ndarray
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    try:
-        if np.any(np.isnan(X)) or np.any(np.isinf(X)):
-            lprint(ll.WARN,  "Input dataset X contains NaN or inf values. Cleaning dataset.")
-            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-        if np.any(np.isnan(y)) or np.any(np.isinf(y)):
-            lprint(ll.WARN,  "Input dataset y contains NaN or inf values. Cleaning dataset.")
-            y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        var = np.var(X, axis=0)
-        valid_features = var > 0
-        if not np.all(valid_features):
-            lprint(ll.WARN,  f"Removing {np.sum(~valid_features)} features with zero variance.")
-            X = X[:, valid_features]
-        
+    try:        
         check_pytorch_version()
         set_seed(config.seed)
         lprint(ll.INFO,  f"Random seed set to {config.seed}")
@@ -502,7 +492,7 @@ def rprop_mlp_main(target:str, config: ModelConfig, X: np.ndarray, y: np.ndarray
         lprint(ll.ERROR,  f"Main function failed: {str(e)}")
         raise
     except Exception as e:
-        lprint(ll.ERROR,  f"Unexpected error in main function: {str(e)}", exc_info=True)
+        lprint(ll.ERROR,  f"Unexpected error in main function: {str(e)}")
         raise
     finally:
         gc.collect()

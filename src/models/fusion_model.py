@@ -1,133 +1,42 @@
 import torch
 import torch.nn as nn
-from typing import List
 from src.utils.logging import lprint, LoggingLevels as ll
 
-class FusionModel(nn.Module):
-    def __init__(self, teacher_output_sizes: List[int], hidden_layers: List[int], 
-                 activations: List[str], dropout_prob: float = 0.3, batch_norm: bool = False):
-        """
-        Initialize the FusionModel to integrate outputs from heterogeneous pre-trained models.
+class TransformerFusionModel(nn.Module):
+    def __init__(self, teacher_output_sizes, hidden_dim=128, nhead=5, num_layers=2, dropout=0.3, batch_norm=True):
+        super(TransformerFusionModel, self).__init__()
+        self.input_dim = sum(teacher_output_sizes)  # 5
+        self.hidden_dim = hidden_dim
+        self.nhead = nhead
         
-        Args:
-            teacher_output_sizes (List[int]): List of output sizes from teacher models.
-            hidden_layers (List[int]): List of sizes for hidden layers in the fusion network.
-            activations (List[str]): List of activation functions for each layer.
-            dropout_prob (float): Dropout probability for regularization.
-            batch_norm (bool): Whether to include batch normalization layers.
-        """
-        super(FusionModel, self).__init__()
+        if hidden_dim % nhead != 0:
+            lprint(ll.WARN, f"hidden_dim {hidden_dim} not divisible by nhead {nhead}. Adjusting nhead.")
+            self.nhead = min([i for i in range(1, hidden_dim + 1) if hidden_dim % i == 0], key=lambda x: abs(x - nhead))
+        
+        self.input_projection = nn.Linear(self.input_dim, hidden_dim)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=self.nhead,
+            dim_feedforward=hidden_dim * 2,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.output_layer = nn.Linear(hidden_dim, len(teacher_output_sizes))
+        self.batch_norm = nn.BatchNorm1d(hidden_dim) if batch_norm else nn.Identity()
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, teacher_outputs, mask=None):
         try:
-            
-            lprint("Initializing FusionModel with parameters: "
-                       f"teacher_output_sizes={teacher_output_sizes}, hidden_layers={hidden_layers}, "
-                       f"activations={activations}, dropout_prob={dropout_prob}, batch_norm={batch_norm}")
-            
-            if not teacher_output_sizes or any(size <= 0 for size in teacher_output_sizes):
-                lprint(ll.ERROR, "Invalid teacher_output_sizes: must be non-empty and contain positive integers")
-                raise ValueError("teacher_output_sizes must be non-empty and contain positive integers")
-            if not hidden_layers or any(size <= 0 for size in hidden_layers):
-                lprint(ll.ERROR, "Invalid hidden_layers: must be non-empty and contain positive integers")
-                raise ValueError("hidden_layers must be non-empty and contain positive integers")
-            if len(activations) != len(hidden_layers):
-                lprint(ll.ERROR, f"Number of activations ({len(activations)}) must match number of hidden layers ({len(hidden_layers)})")
-                raise ValueError("Number of activations must match number of hidden layers")
-            if not (0 <= dropout_prob <= 1):
-                lprint(ll.ERROR, f"Invalid dropout_prob: {dropout_prob}, must be between 0 and 1")
-                raise ValueError("dropout_prob must be between 0 and 1")
-
-            input_size = sum(teacher_output_sizes)  # Concatenated outputs from teachers
-            lprint(ll.DEBUG,f"Calculated input size (sum of teacher outputs): {input_size}")
-
-            # Build fusion layer
-            layers = []
-            current_size = input_size
-            for i, (hidden_size, activation) in enumerate(zip(hidden_layers, activations)):
-                layers.append(nn.Linear(current_size, hidden_size))
-                lprint(ll.DEBUG,f"Layer {i+1}: Added Linear layer: {current_size} -> {hidden_size}")
-
-                if batch_norm:
-                    layers.append(nn.BatchNorm1d(hidden_size))
-                    lprint(ll.DEBUG,f"Layer {i+1}: Added BatchNorm1d for hidden size: {hidden_size}")
-
-                # Add activation function
-                if activation.lower() == 'relu':
-                    layers.append(nn.ReLU())
-                    lprint(ll.DEBUG,f"Layer {i+1}: Added ReLU activation")
-                elif activation.lower() == 'prelu':
-                    layers.append(nn.PReLU())
-                    lprint(ll.DEBUG,f"Layer {i+1}: Added PReLU activation")
-                elif activation.lower() == 'tanh':
-                    layers.append(nn.Tanh())
-                    lprint(ll.DEBUG,f"Layer {i+1}: Added Tanh activation")
-                else:
-                    lprint(ll.ERROR, f"Unsupported activation function: {activation}")
-                    raise ValueError(f"Unsupported activation function: {activation}")
-
-                layers.append(nn.Dropout(dropout_prob))
-                lprint(ll.DEBUG,f"Layer {i+1}: Added Dropout layer with probability: {dropout_prob}")
-                current_size = hidden_size
-
-            self.fusion_layer = nn.Sequential(*layers)
-            lprint(ll.DEBUG,f"Fusion layer constructed with {len(layers)} components")
-
-            # Output heads (one for each teacher model's output size)
-            self.heads = nn.ModuleList([nn.Linear(hidden_layers[-1], size) for size in teacher_output_sizes])
-            lprint(ll.DEBUG,f"Created {len(self.heads)} output heads with sizes: {teacher_output_sizes}")
-
-            # Initialize weights
-            for i, layer in enumerate(self.fusion_layer):
-                if isinstance(layer, nn.Linear):
-                    nn.init.kaiming_uniform_(layer.weight, nonlinearity='relu')
-                    nn.init.zeros_(layer.bias)
-                    lprint(ll.DEBUG,f"Layer {i//4 + 1}: Initialized Linear layer weights with Kaiming uniform and zero bias")
-            for i, head in enumerate(self.heads):
-                nn.init.xavier_uniform_(head.weight, gain=0.1)
-                nn.init.zeros_(head.bias)
-                lprint(ll.DEBUG,f"Head {i+1}: Initialized weights with Xavier uniform (gain=0.1) and zero bias")
-
-            lprint(ll.INFO, "FusionModel initialization completed successfully")
+            x = torch.cat(teacher_outputs, dim=-1)  # [batch_size, 5]
+            x = self.input_projection(x)  # [batch_size, hidden_dim]
+            x = self.batch_norm(x)
+            x = self.dropout(x)
+            x = x.unsqueeze(1)  # [batch_size, 1, hidden_dim]
+            x = self.transformer(x)  # [batch_size, 1, hidden_dim]
+            x = x.squeeze(1)  # [batch_size, hidden_dim]
+            return self.output_layer(x)  # [batch_size, 5]
         except Exception as e:
-            lprint(ll.ERROR, f"Error in FusionModel initialization: {str(e)}")
-            raise
-
-    def forward(self, teacher_outputs: List[torch.Tensor]) -> List[torch.Tensor]:
-        """
-        Forward pass to combine teacher outputs and produce final predictions.
-        
-        Args:
-            teacher_outputs (List[torch.Tensor]): List of output tensors from teacher models.
-        
-        Returns:
-            List[torch.Tensor]: List of output tensors from each head.
-        """
-        try:
-            lprint(ll.DEBUG,"Starting FusionModel forward pass")
-
-            if not teacher_outputs:
-                lprint(ll.ERROR,"Empty teacher_outputs list provided")
-                raise ValueError("teacher_outputs list cannot be empty")
-            if any(not isinstance(t, torch.Tensor) for t in teacher_outputs):
-                lprint(ll.ERROR,"All teacher_outputs must be torch.Tensor")
-                raise ValueError("All teacher_outputs must be torch.Tensor")
-            if any(t.ndim != 2 for t in teacher_outputs):
-                lprint(ll.ERROR,"All teacher_outputs must be 2D tensors")
-                raise ValueError("All teacher_outputs must be 2D tensors")
-
-            # Concatenate teacher outputs
-            fused_input = torch.cat(teacher_outputs, dim=1)
-            lprint(ll.DEBUG,f"Concatenated teacher outputs, shape: {fused_input.shape}")
-
-            # Pass through fusion layer
-            fused_features = self.fusion_layer(fused_input)
-            lprint(ll.DEBUG,f"Fusion layer output shape: {fused_features.shape}")
-
-            # Generate outputs from each head
-            outputs = [head(fused_features) for head in self.heads]
-            lprint(ll.DEBUG,f"Generated {len(outputs)} outputs from heads: {[out.shape for out in outputs]}")
-
-            lprint(ll.DEBUG,"Forward pass completed successfully")
-            return outputs
-        except Exception as e:
-            lprint(ll.ERROR,f"Error in FusionModel forward pass: {str(e)}")
+            lprint(ll.ERROR, f"Error in TransformerFusionModel forward: {str(e)}")
             raise
