@@ -86,13 +86,13 @@ def filter_descriptors(df_descriptor: pd.DataFrame,
     return df_descriptor[final_descriptors]
 
 
-def calculate_descriptors(smiles: pd.Series, filter_descriptors:bool = True)-> pd.DataFrame:
+def calculate_descriptors(smiles: pd.Series, filter:bool = True)-> pd.DataFrame:
     "calculate pandas dataframe of descriptor by a Series of SMILES"
     lprint(ll.INFO, "Compute Descriptors")
     descriptor_calculator = Calculator(descriptors, ignore_3D=True)
     mol_list = [Chem.MolFromSmiles(s) for s in smiles]
     df_descriptor = descriptor_calculator.pandas(mol_list)
-
+    
     valid_cols = [col for col in df_descriptor.columns if is_not_numeric(df_descriptor[col])]
     df_descriptor = df_descriptor[valid_cols]
     df_descriptor = df_descriptor.astype({col: np.float64 for col in df_descriptor.select_dtypes(include=['float32', 'float']).columns})
@@ -105,7 +105,7 @@ def calculate_descriptors(smiles: pd.Series, filter_descriptors:bool = True)-> p
             col_to_remove.append(des)
     df_descriptor.drop(columns=col_to_remove, inplace=True)
     
-    if filter_descriptors:
+    if filter:
         df_descriptor = filter_descriptors(df_descriptor.copy())
 
     return df_descriptor

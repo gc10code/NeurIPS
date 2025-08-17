@@ -4,9 +4,10 @@ from typing import Dict, Any, List, Tuple, Union
 from datetime import datetime
 from skopt.space import Real, Integer, Categorical
 
-from src.config.model_config import ModelConfig, FusionConfig
+from src.config.model_config import RPropConfig, HRMConfig
 from src.utils.exceptions import ConfigurationError
 from src.utils.logging import lprint, LoggingLevels as ll
+from src.utils.validators import ConfigValidator
 
 class ConfigManager:
     """Manages configuration loading, saving, and validation."""
@@ -16,18 +17,108 @@ class ConfigManager:
 
 
     @staticmethod
-    def create_default_config(type: str = "rprop") -> Union[ModelConfig, FusionConfig]:
-        """Create a default ModelConfig instance."""
-        try:
-            if type == "rprop":
-                return ModelConfig()
-            elif type == "fusion":
-                return FusionConfig()
-        except Exception as e:
-            raise ConfigurationError(f"Failed to create default configuration: {str(e)}")
+    def create_default_config(config_type: str = 'rprop') -> Union[Dict[str, Any], HRMConfig]:
+        """
+        Create a default configuration for RPropMLP or FusionModel.
+
+        Args:
+            config_type (str): Type of configuration ('rprop' or 'fusion').
+
+        Returns:
+            Union[Dict[str, Any], HRMConfig]: Default configuration (dict for rprop, HRMConfig for fusion).
+
+        Raises:
+            ValueError: If config_type is invalid or configuration is invalid.
+        """
+        if config_type not in ['rprop', 'fusion']:
+            lprint(ll.ERROR, f"Invalid config_type: {config_type}. Must be 'rprop' or 'fusion'")
+            raise ValueError(f"Invalid config_type: {config_type}")
+
+        if config_type == 'rprop':
+            config = RPropConfig()
+            try:
+                config = RPropConfig(
+                    hidden_layers=[64, 32],  # Example values
+                    activations=['relu'],    # Example values
+                )
+                return config
+            except ValueError as e:
+                    lprint(ll.ERROR, f"Configuration validation failed: {str(e)}")
+                    raise
+        else:  # config_type == 'fusion'
+            try:
+                config = HRMConfig(
+                    input_size=52,  # Matches X_fusion.shape[1]
+                    num_targets=5,  # Matches len(targets)
+                    low_hidden=64,
+                    high_hidden=128,
+                    act_eps=0.1,
+                    max_high_steps=5,
+                    max_low_steps=5,
+                    training_type='fold',
+                    learning_rate=0.001,
+                    batch_size=32,
+                    max_epochs=100,
+                    k_folds=5,
+                    patience=10,
+                    min_delta=1e-4,
+                    shuffle=True,
+                    target_error=0.0,
+                    gradient_clipping=1.0,
+                    input_normalization=True,
+                    output_normalization=True,
+                    seed=42,
+                    num_workers=4,
+                    pin_memory=True,
+                    validation_split=0.2,
+                    dropout_prob=0.1,
+                    batch_norm=True,
+                    output_size=1,
+                    problem_type='regression',
+                    input_dir='./data',
+                    output_dir='./output',
+                    memory_check_interval=10,
+                    checkpoint_interval=50
+                )
+                lprint(ll.INFO, "Default fusion configuration created successfully")
+                return config
+            except ValueError as e:
+                lprint(ll.ERROR, f"Failed to create default fusion configuration: {str(e)}")
+                raise
 
     @staticmethod
-    def save_config(config: ModelConfig, output_path: Path) -> None:
+    def update_config(config: Union[Dict[str, Any], HRMConfig, RPropConfig], updates: Dict[str, Any], config_type: str = 'rprop') -> Union[Dict[str, Any], HRMConfig]:
+        """
+        Update configuration with new values and validate.
+
+        Args:
+            config (Union[Dict[str, Any], HRMConfig]): Existing configuration.
+            updates (Dict[str, Any]): Dictionary of updates.
+            config_type (str): Type of configuration ('rprop' or 'fusion').
+
+        Returns:
+            Union[Dict[str, Any], HRMConfig]: Updated and validated configuration.
+        """
+        if config_type == 'fusion' and isinstance(config, HRMConfig):
+            try:
+                config.update(updates)
+                return config
+            except ValueError as e:
+                lprint(ll.ERROR, f"HRMConfig update failed: {str(e)}")
+                raise
+        else:
+            updated_config = config
+            updated_config.update(updates)
+            try:
+                ConfigValidator.validate_config(updated_config, config_type=config_type)
+                lprint(ll.INFO, f"Updated {config_type} configuration validated successfully")
+                return updated_config
+            except ValueError as e:
+                lprint(ll.ERROR, f"Configuration update failed: {str(e)}")
+                raise
+
+    @staticmethod
+    def save_config(config: RPropConfig, output_path: Path) -> None:
         """Save configuration to a YAML file."""
         try:
             output_path.mkdir(parents=True, exist_ok=True)
@@ -113,7 +204,7 @@ class ConfigManager:
             raise ConfigurationError(f"Failed to load Bayesian search configuration from {pickle_path}: {str(e)}")
     
     @staticmethod
-    def get_params(config:Union[ModelConfig, FusionConfig])-> Tuple:
+    def get_params(config:Union[RPropConfig, HRMConfig])-> Tuple:
         return(config.learning_rate,
                config.batch_size,
                len(config.hidden_layers),
@@ -123,18 +214,3 @@ class ConfigManager:
                config.minus_delta,
                config.min_delta, 
                config.max_delta)
-    
-    @staticmethod
-    def update_config(config:Union[ModelConfig, FusionConfig], args:Tuple)-> Union[ModelConfig, FusionConfig]:
-        learning_rate, batch_size, hidden_layers, activations, plus_delta, minus_delta, min_delta, max_delta = args
-        
-        config.learning_rate = learning_rate 
-        config.batch_size = batch_size
-        config.hidden_layers = hidden_layers
-        config.activations = activations
-        config.plus_delta = plus_delta
-        config.minus_delta = minus_delta
-        config.min_delta = min_delta
-        config.max_delta = max_delta
-
-        return config

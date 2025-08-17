@@ -16,7 +16,7 @@ from datetime import datetime
 from src.models.rprop_mlp import RPropMLP
 from src.utils.early_stopping import EarlyStopping
 from src.utils.metrics import evaluate_model
-from src.config.model_config import ModelConfig
+from src.config.model_config import RPropConfig
 from src.utils.exceptions import TrainingError
 from src.utils.normalizer import DataNormalizer
 from src.training.data_preparation import create_data_loaders
@@ -32,7 +32,7 @@ import numba as nb
 
 normalizer = DataNormalizer("minmax", "minmax")
 
-def create_model(config: ModelConfig, input_size: int, hidden_layers: List[int], 
+def create_model(config: RPropConfig, input_size: int, hidden_layers: List[int], 
                  activations: List[str], device: torch.device) -> RPropMLP:
     """Create and initialize an RPropMLP model."""
     try:
@@ -54,51 +54,52 @@ def create_model(config: ModelConfig, input_size: int, hidden_layers: List[int],
         raise TrainingError(f"Failed to create model: {str(e)}")
 
 def train_epoch(model: RPropMLP, train_loader: torch.utils.data.DataLoader, optimizer: torch.optim.Optimizer, 
-                criterion: nn.Module, device: torch.device, config: ModelConfig) -> float:
+                criterion: nn.Module, device: torch.device, config: RPropConfig) -> float:
     """Train the model for one epoch."""
     try:
         model.train()
         train_losses = []
         
-        for batch_X, batch_y in train_loader:
+        for batch_idx, (batch_X, batch_y) in enumerate(train_loader):
             batch_X, batch_y = batch_X.to(device), batch_y.to(device)
             
             optimizer.zero_grad()
-            outputs = model(batch_X)
-            
-            if config.problem_type == 'regression':
-                if outputs.dim() == 1:
-                    outputs = outputs.unsqueeze(1)
-                elif outputs.dim() > 2:
-                    outputs = outputs.squeeze(-1)
+            outputs: torch.Tensor = model(batch_X)
             
             loss = criterion(outputs, batch_y)
-            
-            if torch.isnan(loss):
-                lprint(ll.ERROR,  "NaN loss detected during training")
-                raise TrainingError("NaN loss detected during training")
-            
+            if torch.isnan(loss) or torch.isinf(loss):
+                lprint(ll.ERROR, f"NaN or Inf loss detected in batch {batch_idx}")
+                raise TrainingError(f"NaN or Inf loss detected in batch {batch_idx}")
             loss.backward()
+    
+            for name, param in model.named_parameters():
+                if param.grad is None:
+                    lprint(ll.WARN, f"Batch {batch_idx}: No gradient for parameter {name}")
+                else:
+                    lprint(ll.DEBUG, f"Batch {batch_idx}: Gradient for {name}: min={param.grad.min().item()}, max={param.grad.max().item()}, mean={param.grad.mean().item()}")
             
             if config.gradient_clipping > 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.gradient_clipping)
+                lprint(ll.DEBUG, f"Batch {batch_idx}: gradient norm={grad_norm.item()}")
             
             optimizer.step()
+            lprint(ll.DEBUG, f"Batch {batch_idx}: optimizer step completed")
             train_losses.append(loss.item())
         
-        avg_loss = np.mean(train_losses)
-        lprint(ll.DEBUG,  f"Epoch training completed, average loss: {avg_loss:.6f}")
+        avg_loss = torch.tensor(train_losses).mean().item()
+        lprint(ll.DEBUG, f"Epoch training completed, average loss: {avg_loss:.6f}")
         return avg_loss
     except Exception as e:
-        lprint(ll.ERROR,  f"Training epoch failed: {str(e)}")
-        raise TrainingError(f"Training epoch failed: {str(e)}")
+        lprint(ll.ERROR, f"Training epoch failed: {str(e)}: batch_X shape={batch_X.shape}, batch_y shape={batch_y.shape}, outputs shape={outputs.shape if 'outputs' in locals() else 'not computed'}")
+        raise
 
 def validate_epoch(model: RPropMLP, val_loader: torch.utils.data.DataLoader, criterion: nn.Module, 
-                   device: torch.device, config: ModelConfig) -> float:
+                   device: torch.device, config: RPropConfig) -> float:
     """Validate the model for one epoch."""
     try:
         model.eval()
-        val_losses = []
+        val_losses = torch.tensor([], device=device, dtype=torch.float32)  # empty versor
+        
         with torch.no_grad():
             for val_X, val_y in val_loader:
                 val_X, val_y = val_X.to(device), val_y.to(device)
@@ -107,23 +108,25 @@ def validate_epoch(model: RPropMLP, val_loader: torch.utils.data.DataLoader, cri
                 if config.problem_type == 'regression':
                     if val_outputs.dim() == 1:
                         val_outputs = val_outputs.unsqueeze(1)
+                        lprint(ll.DEBUG, f"Batch reshaped: val_outputs shape={val_outputs.shape}")
                     elif val_outputs.dim() > 2:
                         val_outputs = val_outputs.squeeze(-1)
+                        lprint(ll.DEBUG, f"Batch squeezed: val_outputs shape={val_outputs.shape}")
                 
-                val_loss = criterion(val_outputs, val_y).item()
-                val_losses.append(val_loss)
+                val_loss = criterion(val_outputs, val_y)
+                val_losses = torch.cat([val_losses, val_loss.unsqueeze(0)])  # add val loss as a 1D tensor
         
-        avg_val_loss = np.mean(val_losses)
-        lprint(ll.DEBUG,  f"Epoch validation completed, average loss: {avg_val_loss:.6f}")
+        avg_val_loss = torch.mean(val_losses).item()
+        lprint(ll.DEBUG, f"Epoch validation completed, average loss: {avg_val_loss:.6f}")
         return avg_val_loss
     except Exception as e:
-        lprint(ll.ERROR,  f"Validation epoch failed: {str(e)}")
+        lprint(ll.ERROR, f"Validation epoch failed: {str(e)}")
         raise TrainingError(f"Validation epoch failed: {str(e)}")
-
+    
 def train_model(model: RPropMLP, 
                 train_loader: torch.utils.data.DataLoader, 
                 val_loader: torch.utils.data.DataLoader,
-                config: ModelConfig, 
+                config: RPropConfig, 
                 device: torch.device,
                 log_info: Tuple) -> Tuple[RPropMLP, float, Dict[str, List[float]]]:
     """Train model using DataLoader with comprehensive monitoring."""
@@ -142,14 +145,16 @@ def train_model(model: RPropMLP,
         
         lprint(ll.INFO,  f"RProp parameters: δ+={delta_plus:.3f}, δ-={delta_minus:.3f}, "
                    f"δ_min={delta_min:.6f}, δ_max={delta_max:.3f}")
-        
+        """
         optimizer = torch.optim.Rprop(
             model.parameters(),
             lr=config.learning_rate,
             etas=(delta_minus, delta_plus),
             step_sizes=(delta_min, delta_max)
         )
-        criterion = nn.MSELoss() if config.problem_type == 'regression' else nn.CrossEntropyLoss()
+        """
+        optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
+        criterion = nn.L1Loss() if config.problem_type == 'regression' else nn.CrossEntropyLoss()
         
         early_stopping = EarlyStopping(
             patience=config.patience,
@@ -162,6 +167,12 @@ def train_model(model: RPropMLP,
             'learning_rate': [],
             'grad_norm': []
         }
+        # Controlla hook
+        for module in model.modules():
+            if hasattr(module, '_forward_hooks') and module._forward_hooks:
+                lprint(ll.DEBUG, f"Forward hooks found on module {module}: {module._forward_hooks}")
+            if hasattr(module, '_backward_hooks') and module._backward_hooks:
+                lprint(ll.DEBUG, f"Backward hooks found on module {module}: {module._backward_hooks}")
         
         best_val_loss = ConfigManager.START_MAX_LOSS_VAL
         best_model_state = None
@@ -216,7 +227,7 @@ def train_model(model: RPropMLP,
         lprint(ll.ERROR,  f"Training failed: {str(e)}")
         raise TrainingError(f"Training failed: {str(e)}")
 
-def train_fold(args: Tuple[int, int, Tuple, np.ndarray, np.ndarray, ModelConfig, torch.device]) -> Dict[str, Any]:
+def train_fold(args: Tuple[int, int, Tuple, np.ndarray, np.ndarray, RPropConfig, torch.device]) -> Dict[str, Any]:
     fold, param_idx, grid_params, X_norm, y_norm, config, device = args
     lr, batch_size, hidden_layers, activation, delta_plus, delta_minus, delta_min, delta_max = grid_params
     
@@ -277,7 +288,7 @@ def train_fold(args: Tuple[int, int, Tuple, np.ndarray, np.ndarray, ModelConfig,
         lprint(ll.ERROR, prefix +f"Training failed for fold {fold + 1}, params {param_idx}: {str(e)}")
         return None
 
-def create_tasks(config: ModelConfig, params: Tuple, X_norm: torch.Tensor, 
+def create_tasks(config: RPropConfig, params: Tuple, X_norm: torch.Tensor, 
                 y_norm: torch.Tensor, device: torch.device, param_idx: int) -> List[Tuple]:
     """Create tasks for K-fold cross-validation or split training for a single parameter set."""
     try:
@@ -370,7 +381,7 @@ def run_training(tasks: List[Tuple], use_multiprocessing: bool = True) -> List[D
         lprint(ll.INFO,  f"Single-threaded execution completed with {len(results)} results")
         return [r for r in results if r is not None]
 
-def objective(params: List, config: ModelConfig, X_norm: torch.Tensor, y_norm: torch.Tensor, 
+def objective(params: List, config: RPropConfig, X_norm: torch.Tensor, y_norm: torch.Tensor, 
               device: torch.device, output_dir: Path, param_idx: int, log_file: Path) -> float:
     """Objective function for Bayesian optimization."""
     try:
@@ -403,7 +414,7 @@ def objective(params: List, config: ModelConfig, X_norm: torch.Tensor, y_norm: t
         return ConfigManager.START_MAX_LOSS_VAL
 
 
-def rprop_mlp_main(target:str, config: ModelConfig, X: np.ndarray, y: np.ndarray, use_multiprocessing: bool = True, max_combinations: int = 100) -> Dict[str, Any]:
+def rprop_mlp_main(target:str, config: RPropConfig, X: np.ndarray, y: np.ndarray, use_multiprocessing: bool = True, max_combinations: int = 100) -> Dict[str, Any]:
     start_time = time.time()
     lprint(ll.INFO,  f"=== RProp MLP Bayesian Optimization Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
     
@@ -459,16 +470,16 @@ def rprop_mlp_main(target:str, config: ModelConfig, X: np.ndarray, y: np.ndarray
         
         best_params = {
             'learning_rate': result.x[0],
-            'batch_size': result.x[1],
+            'batch_size': int(result.x[1]),
             'hidden_layers': [max(4, int(n_features * (result.x[3] ** i))) for i in range(result.x[2])],
-            'activation': [result.x[4]] * result.x[2],
-            'delta_plus': result.x[5],
-            'delta_minus': result.x[6],
-            'delta_min': result.x[7],
-            'delta_max': result.x[8]
+            'activations': [result.x[4]] * result.x[2],
+            'plus_delta': result.x[5],
+            'minus_delta': result.x[6],
+            'min_delta': result.x[7],
+            'max_delta': result.x[8]
         }
         best_val_loss = result.fun
-        
+
         lprint(ll.SUCCESS,  f"Bayesian Optimization Completed")
         lprint(ll.SUCCESS,  f"Best parameters: {best_params}")
         lprint(ll.SUCCESS,  f"Best validation loss: {best_val_loss:.6f}")
@@ -479,7 +490,7 @@ def rprop_mlp_main(target:str, config: ModelConfig, X: np.ndarray, y: np.ndarray
         # Retraining of final model
         lprint(ll.SUCCESS,  f"Retraining of best params model")
         final_config = ConfigManager.create_default_config("rprop")
-        final_config = ConfigManager.update_config(final_config, best_params.values())
+        final_config = ConfigManager.update_config(final_config, best_params)
         final_params = result.x    
         final_tasks = create_tasks(final_config, final_params, X_norm, y_norm, device, 1)
         final_fold_results = run_training(final_tasks, use_multiprocessing=False)  # Disable multiprocessing for stability

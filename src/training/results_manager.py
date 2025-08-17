@@ -6,7 +6,7 @@ import torch
 from skopt.space import Real, Integer, Categorical
 from src.utils.io import save_results
 from src.utils.exceptions import IOOperationError
-from src.config.model_config import ModelConfig, FusionConfig
+from src.config.model_config import RPropConfig, HRMConfig
 from src.config.config_manager import ConfigManager
 from src.models.rprop_mlp import RPropMLP
 import traceback
@@ -126,7 +126,7 @@ class ResultsManager:
                 raise ValueError("Fold results list is empty")
                 
             best_model = None
-            best_loss = float('inf')
+            best_loss = ConfigManager.START_MAX_LOSS_VAL
             for result in fold_results:
                 loss = result['val_loss']
                 if loss < best_loss:

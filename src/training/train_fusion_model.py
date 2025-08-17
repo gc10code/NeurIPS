@@ -1,277 +1,501 @@
+from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-from typing import List, Union
-from skopt import gp_minimize
-from skopt.space import Real, Integer, Categorical
+from typing import List, Tuple, Dict, Optional
+from dataclasses import dataclass
 import numpy as np
-from pathlib import Path
-import signal
-import multiprocessing as mp
-from datetime import datetime
-import gc
-
-from src.utils.activations import ACTIVATION_FUNCTIONS
+from tqdm import tqdm
+from src.config.model_config import HRMConfig
+from src.utils.logging import lprint, LoggingLevels as ll
+from src.models.fusion_model import FusionModel
 from src.models.rprop_mlp import RPropMLP
-from src.models.fusion_model import TransformerFusionModel
-from src.config.model_config import FusionConfig
-from src.config.config_manager import ConfigManager
-from src.training.data_preparation import create_dataloader
-from src.utils.metrics import wMAE_loss, compute_wmae_weights
-import src.utils.system_utils as su
-import src.training.train_rprop_mlp as train_rprop
-from src.training.data_preparation import prepare_data
-from src.training.results_manager import ResultsManager
-from src.utils.system_utils import *
-from src.utils.logging import lprint, LoggingLevels as ll
+import os
+import pandas as pd
+from pathlib import Path
 
-# Setup
-su.set_seed(42)
-device = su.setup_device()
+@dataclass
+class TrainingConfig:
+    """Configuration for training the FusionModel and refining teachers."""
+    learning_rate_fusion: float = 0.001
+    learning_rate_teachers: float = 0.001  # Increased from 0.0001 to encourage teacher improvement
+    batch_size: int = 32
+    max_epochs: int = 100
+    patience: int = 10
+    min_delta: float = 1e-4
+    output_dir: str = "./output"
+    checkpoint_interval: int = 50
+    validation_split: float = 0.2
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-import torch
-from src.utils.logging import lprint, LoggingLevels as ll
+class FusionTrainer:
+    def __init__(self, fusion_model: FusionModel, teacher_models: List[nn.Module], config: TrainingConfig):
+        """
+        Initialize the trainer for the FusionModel and teacher models.
 
+        Args:
+            fusion_model (FusionModel): The fusion model to train.
+            teacher_models (List[nn.Module]): List of pre-trained teacher models.
+            config (TrainingConfig): Training configuration.
+        """
+        self.fusion_model = fusion_model.to(config.device)
+        self.teacher_models = [teacher.to(config.device) for teacher in teacher_models]
+        self.config = config
+        self.device = config.device
+        self.optimizer_fusion = optim.Adam(self.fusion_model.parameters(), lr=config.learning_rate_fusion)
+        self.optimizers_teachers = [optim.Adam(teacher.parameters(), lr=config.learning_rate_teachers) 
+                                   for teacher in self.teacher_models]
+        self.scheduler_fusion = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer_fusion, mode='min', factor=0.5, patience=5
+        )
+        self.schedulers_teachers = [
+            optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
+            for opt in self.optimizers_teachers
+        ]
+        self.criterion = nn.L1Loss(reduction='none')  # For regression tasks
+        self.best_val_loss = float('inf')
+        self.patience_counter = 0
+        self.best_model_path = os.path.join(config.output_dir, "best_fusion_model.pth")
 
-def generate_bayesian_search(n_samples: int, n_features: int, teacher_output_sizes: List[int], 
-                            problem_type: str = 'regression', max_combinations: int = 20) -> tuple:
-    search_space = [
-        Real(1e-5, 5e-4, name='learning_rate', prior='log-uniform'),
-        Integer(8, min(n_samples // 4, 64), name='batch_size'),
-        Real(0.1, 0.5, name='dropout_prob'),
-        Integer(1, 3, name='num_layers'),
-        Integer(64, 256, name='hidden_dim'),
-        Integer(1, 5, name='nhead'),
-        Real(0.6, 1.0, name='alpha'),
-        Real(0.0, 0.000016, name='beta')
-    ]
+    def compute_loss(self, outputs: torch.Tensor, targets: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Compute masked MSE loss, considering valid_mask to ignore synthetic targets.
 
-    report = (
-        f"Bayesian search space defined with {len(search_space)} dimensions:\n"
-        f"- learning_rate: [1e-5, 5e-4]\n"
-        f"- batch_size: [8, {min(n_samples // 4, 64)}]\n"
-        f"- dropout_prob: [0.1, 0.5]\n"
-        f"- num_layers: [1, 3]\n"
-        f"- hidden_dim: [64, 256]\n"
-        f"- nhead: [1, 5]\n"
-        f"- alpha: [0.6, 1.0]\n"
-        f"- beta: [0.0, 0.000016]\n"
-        f"Dataset: n_samples={n_samples}, n_features={n_features}, n_outputs={len(teacher_output_sizes)}"
+        Args:
+            outputs (torch.Tensor): Model predictions [B, num_targets] or [B, 1].
+            targets (torch.Tensor): Ground truth targets [B, num_targets] or [B, 1].
+            valid_mask (torch.Tensor): Boolean mask [B, num_targets] or [B, 1].
+
+        Returns:
+            torch.Tensor: Masked loss.
+        """
+        loss = self.criterion(outputs, targets)  # [B, num_targets] or [B, 1]
+        masked_loss = loss * valid_mask.float()  # Apply mask
+        return masked_loss.sum() / valid_mask.sum().clamp(min=1)  # Average over valid entries
+
+    def train_step(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor], targets: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Perform a single training step for the fusion model and teachers.
+
+        Args:
+            batch: Tuple of (X_fusion, y_fusion, valid_mask).
+            targets: List of target names for logging.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Fusion loss and average teacher loss.
+        """
+        X_fusion, y_fusion, valid_mask = [x.to(self.device) for x in batch]
+        B, T = y_fusion.shape
+
+        # Fusion model forward pass
+        self.optimizer_fusion.zero_grad()
+        outputs, info = self.fusion_model(y_fusion)  # [B, num_targets]
+        fusion_loss = self.compute_loss(outputs, y_fusion, valid_mask)
+
+        # Teacher refinement
+        teacher_losses = []
+        for i, (teacher, optimizer, target) in enumerate(zip(self.teacher_models, self.optimizers_teachers, targets)):
+            optimizer.zero_grad()
+            teacher_output = teacher(X_fusion)  # [B, 1]
+            teacher_target = y_fusion[:, i:i+1]  # [B, 1]
+            teacher_mask = valid_mask[:, i:i+1]  # [B, 1]
+            teacher_loss = self.compute_loss(teacher_output, teacher_target, teacher_mask)
+            teacher_losses.append(teacher_loss)
+
+            # Backpropagate for teacher if mask has valid entries
+            if teacher_mask.sum() > 0:
+                teacher_loss.backward()
+                optimizer.step()
+            else:
+                lprint(ll.DEBUG, f"No valid data for teacher {target} in this batch")
+
+        # Backpropagate for fusion model
+        fusion_loss.backward()
+        self.optimizer_fusion.step()
+
+        # Log per-target teacher losses
+        for i, (target, loss) in enumerate(zip(targets, teacher_losses)):
+            lprint(ll.DEBUG, f"Teacher {target} Train Loss: {loss.item():.4f}")
+
+        return fusion_loss, sum(teacher_losses) / len(teacher_losses)
+
+    def validate(self, val_loader: DataLoader, targets: List[str]) -> Tuple[float, float]:
+        """
+        Validate the fusion model and teachers.
+
+        Args:
+            val_loader (DataLoader): Validation data loader.
+            targets (List[str]): List of target names for logging.
+
+        Returns:
+            Tuple[float, float]: Average fusion validation loss and teacher validation loss.
+        """
+        self.fusion_model.eval()
+        for teacher in self.teacher_models:
+            teacher.eval()
+
+        total_fusion_loss = 0.0
+        total_teacher_loss = 0.0
+        num_batches = 0
+        teacher_losses_per_target = [0.0] * len(targets)
+
+        with torch.no_grad():
+            for batch in val_loader:
+                X_fusion, y_fusion, valid_mask = [x.to(self.device) for x in batch]
+                outputs, _ = self.fusion_model(y_fusion)  # [B, num_targets]
+                fusion_loss = self.compute_loss(outputs, y_fusion, valid_mask)
+                total_fusion_loss += fusion_loss.item()
+
+                teacher_loss = 0.0
+                for i, (teacher, target) in enumerate(zip(self.teacher_models, targets)):
+                    teacher_output = teacher(X_fusion)  # [B, 1]
+                    teacher_target = y_fusion[:, i:i+1]  # [B, 1]
+                    teacher_mask = valid_mask[:, i:i+1]  # [B, 1]
+                    t_loss = self.compute_loss(teacher_output, teacher_target, teacher_mask).item()
+                    teacher_loss += t_loss
+                    teacher_losses_per_target[i] += t_loss
+                total_teacher_loss += teacher_loss / len(self.teacher_models)
+                num_batches += 1
+
+        # Log per-target teacher validation losses
+        for target, t_loss in zip(targets, teacher_losses_per_target):
+            lprint(ll.INFO, f"Teacher {target} Validation Loss: {t_loss / num_batches:.4f}")
+
+        self.fusion_model.train()
+        for teacher in self.teacher_models:
+            teacher.train()
+
+        return total_fusion_loss / num_batches, total_teacher_loss / num_batches
+
+    def compute_prediction_errors(self, val_loader: DataLoader, targets: List[str]) -> None:
+        """
+        Compute and log the differences between predicted and true values for non-synthetic data.
+
+        Args:
+            val_loader (DataLoader): Validation data loader.
+            targets (List[str]): List of target names (e.g., ["Tg", "FFV", "Tc", "Density", "Rg"]).
+        """
+        self.fusion_model.eval()
+        for teacher in self.teacher_models:
+            teacher.eval()
+
+        all_fusion_preds = []
+        all_teacher_preds = []
+        all_true = []
+        all_masks = []
+
+        with torch.no_grad():
+            for batch in val_loader:
+                X_fusion, y_fusion, valid_mask = [x.to(self.device) for x in batch]
+                fusion_preds, _ = self.fusion_model(y_fusion)  # [B, num_targets]
+                all_fusion_preds.append(fusion_preds.cpu())
+                all_true.append(y_fusion.cpu())
+                all_masks.append(valid_mask.cpu())
+
+                teacher_preds = []
+                for teacher in self.teacher_models:
+                    teacher_pred = teacher(X_fusion)  # [B, 1]
+                    teacher_preds.append(teacher_pred.cpu())
+                all_teacher_preds.append(torch.cat(teacher_preds, dim=-1))  # [B, num_targets]
+
+        # Concatenate all predictions and true values
+        fusion_preds = torch.cat(all_fusion_preds, dim=0)  # [num_samples, num_targets]
+        teacher_preds = torch.cat(all_teacher_preds, dim=0)  # [num_samples, num_targets]
+        true_values = torch.cat(all_true, dim=0)  # [num_samples, num_targets]
+        valid_mask = torch.cat(all_masks, dim=0)  # [num_samples, num_targets]
+
+        # Compute and log errors for non-synthetic data
+        lprint(ll.REPORT, "Prediction Errors for Non-Synthetic Data (Validation Set):")
+        for i, target in enumerate(targets):
+            # Select non-synthetic data
+            mask = valid_mask[:, i]  # [num_samples]
+            if mask.sum() == 0:
+                lprint(ll.WARN, f"No non-synthetic data for target {target}")
+                continue
+
+            fusion_pred = fusion_preds[:, i][mask]  # [num_valid]
+            teacher_pred = teacher_preds[:, i][mask]  # [num_valid]
+            true_val = true_values[:, i][mask]  # [num_valid]
+
+            # Compute absolute errors
+            fusion_errors = torch.abs(fusion_pred - true_val)
+            teacher_errors = torch.abs(teacher_pred - true_val)
+
+            # Compute metrics
+            fusion_mae = fusion_errors.mean().item()
+            teacher_mae = teacher_errors.mean().item()
+            fusion_rmse = torch.sqrt(torch.mean(fusion_errors ** 2)).item()
+            teacher_rmse = torch.sqrt(torch.mean(teacher_errors ** 2)).item()
+
+            # Log detailed results
+            lprint(ll.INFO, f"Target {target}:")
+            lprint(ll.INFO, f"  Fusion Model MAE: {fusion_mae:.4f}, RMSE: {fusion_rmse:.4f} (based on teacher outputs)")
+            lprint(ll.INFO, f"  Teacher Model MAE: {teacher_mae:.4f}, RMSE: {teacher_rmse:.4f} (based on molecular descriptors)")
+            lprint(ll.INFO, f"  Number of Non-Synthetic Samples: {mask.sum().item()}")
+            lprint(ll.INFO, f"  Sample Differences (First 5, Fusion):")
+            for j in range(min(5, len(fusion_pred))):
+                lprint(ll.INFO, f"    Sample {j+1}: Predicted = {fusion_pred[j]:.4f}, True = {true_val[j]:.4f}, Error = {fusion_errors[j]:.4f}")
+            lprint(ll.INFO, f"  Sample Differences (First 5, Teacher):")
+            for j in range(min(5, len(teacher_pred))):
+                lprint(ll.INFO, f"    Sample {j+1}: Predicted = {teacher_pred[j]:.4f}, True = {true_val[j]:.4f}, Error = {teacher_errors[j]:.4f}")
+
+    def train(self, train_loader: DataLoader, val_loader: DataLoader, targets: List[str]) -> None:
+        """
+        Train the fusion model and refine teachers.
+
+        Args:
+            train_loader (DataLoader): Training data loader.
+            val_loader (DataLoader): Validation data loader.
+            targets (List[str]): List of target names.
+        """
+        os.makedirs(self.config.output_dir, exist_ok=True)
+
+        for epoch in range(self.config.max_epochs):
+            self.fusion_model.train()
+            for teacher in self.teacher_models:
+                teacher.train()
+
+            total_fusion_loss = 0.0
+            total_teacher_loss = 0.0
+            num_batches = 0
+
+            for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.config.max_epochs}"):
+                fusion_loss, teacher_loss = self.train_step(batch, targets)
+                total_fusion_loss += fusion_loss.item()
+                total_teacher_loss += teacher_loss.item()
+                num_batches += 1
+
+                if num_batches % self.config.checkpoint_interval == 0:
+                    torch.save(self.fusion_model.state_dict(), 
+                              os.path.join(self.config.output_dir, f"fusion_checkpoint_epoch_{epoch+1}.pth"))
+                    for i, teacher in enumerate(self.teacher_models):
+                        torch.save(teacher.state_dict(), 
+                                  os.path.join(self.config.output_dir, f"teacher_{i}_checkpoint_epoch_{epoch+1}.pth"))
+
+            avg_fusion_loss = total_fusion_loss / num_batches
+            avg_teacher_loss = total_teacher_loss / num_batches
+            lprint(ll.INFO, f"Epoch {epoch+1}: Train Fusion Loss = {avg_fusion_loss:.4f}, Teacher Loss = {avg_teacher_loss:.4f}")
+
+            # Validation
+            val_fusion_loss, val_teacher_loss = self.validate(val_loader, targets)
+            lprint(ll.REPORT, f"Validation Fusion Loss = {val_fusion_loss:.4f}, Teacher Loss = {val_teacher_loss:.4f}")
+
+            # Update schedulers
+            self.scheduler_fusion.step(val_fusion_loss)
+            for scheduler in self.schedulers_teachers:
+                scheduler.step(val_teacher_loss)
+
+            # Early stopping
+            if val_fusion_loss < self.best_val_loss - self.config.min_delta:
+                self.best_val_loss = val_fusion_loss
+                self.patience_counter = 0
+                torch.save(self.fusion_model.state_dict(), self.best_model_path)
+                lprint(ll.SUCCESS, f"New best model saved with validation loss {val_fusion_loss:.4f}")
+            else:
+                self.patience_counter += 1
+                lprint(ll.WARN, f"No improvement in validation loss. Patience: {self.patience_counter}/{self.config.patience}")
+                if self.patience_counter >= self.config.patience:
+                    lprint(ll.EXIT, "Early stopping triggered")
+                    break
+
+        # Compute and log prediction errors
+        lprint(ll.INFO, "Computing prediction errors for non-synthetic data...")
+        self.compute_prediction_errors(val_loader, targets)
+
+def predict_single_target(teacher: nn.Module, X: torch.Tensor, device: str = "cuda" if torch.cuda.is_available() else "cpu") -> torch.Tensor:
+    """
+    Make a single-target prediction using a specific teacher model.
+
+    Args:
+        teacher (nn.Module): The teacher model to use for prediction.
+        X (torch.Tensor): Input features [B, N].
+        device (str): Device to run the prediction on.
+
+        Returns:
+            torch.Tensor: Predicted values [B, 1].
+    """
+    teacher.eval()
+    X = X.to(device)
+    with torch.no_grad():
+        output = teacher(X)  # [B, 1]
+    return output
+
+def load_fusion_dataset(targets: List[str]) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
+    """
+    Load fusion dataset from TSV files and create X_fusion, y_fusion, and valid_mask.
+
+    Args:
+        targets (List[str]): List of target names (e.g., ["Density", "FFV", "Rg", "Tc", "Tg"]).
+
+    Returns:
+        Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
+            - X_fusion: Tensor of shape (N, D) containing descriptors.
+            - y_fusion: List of tensors, each of shape (N, 1), containing target values.
+            - valid_mask: List of boolean tensors, each of shape (N,), indicating real values.
+    Raises:
+        ValueError: If files are missing, columns are invalid, or data shapes mismatch.
+    """
+    try:
+        lprint(ll.INFO, "Loading fusion dataset")
+        fusion_descriptors_file = Path("./data/fusion_descriptors.tsv") 
+        fusion_target_file = Path("./data/fusion_target.tsv")
+        fusion_meta_file = Path("./data/fusion_meta.tsv")
+
+        # Validate inputs
+        if not all(Path(f).exists() for f in [fusion_descriptors_file, fusion_target_file, fusion_meta_file]):
+            missing = [f for f in [fusion_descriptors_file, fusion_target_file, fusion_meta_file] if not Path(f).exists()]
+            lprint(ll.ERROR, f"Missing files: {missing}")
+            raise ValueError(f"Missing files: {missing}")
+
+        # Read descriptors
+        descriptors_df = pd.read_csv(fusion_descriptors_file, sep='\t')
+        if 'id' not in descriptors_df.columns:
+            lprint(ll.ERROR, "fusion_descriptors.tsv missing 'id' column")
+            raise ValueError("fusion_descriptors.tsv missing 'id' column")
+        lprint(ll.DEBUG, f"Loaded fusion_descriptors.tsv with shape {descriptors_df.shape}")
+
+        # Read targets
+        target_df = pd.read_csv(fusion_target_file, sep='\t')
+        if 'id' not in target_df.columns:
+            lprint(ll.ERROR, "fusion_target.tsv missing 'id' column")
+            raise ValueError("fusion_target.tsv missing 'id' column")
+        missing_targets = [t for t in targets if t not in target_df.columns]
+        if missing_targets:
+            lprint(ll.ERROR, f"Missing target columns in fusion_target.tsv: {missing_targets}")
+            raise ValueError(f"Missing target columns: {missing_targets}")
+        lprint(ll.DEBUG, f"Loaded fusion_target.tsv with shape {target_df.shape}")
+
+        # Read meta (for validity masks)
+        meta_df = pd.read_csv(fusion_meta_file, sep='\t')
+        if 'id' not in meta_df.columns:
+            lprint(ll.ERROR, "fusion_meta.tsv missing 'id' column")
+            raise ValueError("fusion_meta.tsv missing 'id' column")
+        missing_valid_columns = [f"{t}_valid" for t in targets if f"{t}_valid" not in meta_df.columns]
+        if missing_valid_columns:
+            lprint(ll.ERROR, f"Missing validity columns in fusion_meta.tsv: {missing_valid_columns}")
+            raise ValueError(f"Missing validity columns: {missing_valid_columns}")
+        lprint(ll.DEBUG, f"Loaded fusion_meta.tsv with shape {meta_df.shape}")
+
+        # Verify ID consistency
+        descriptors_ids = set(descriptors_df['id'])
+        target_ids = set(target_df['id'])
+        meta_ids = set(meta_df['id'])
+        if not (descriptors_ids == target_ids == meta_ids):
+            lprint(ll.ERROR, "ID mismatch between fusion_descriptors.tsv, fusion_target.tsv, and fusion_meta.tsv")
+            raise ValueError("ID mismatch between files")
+
+        # Sort by ID to ensure alignment
+        descriptors_df = descriptors_df.sort_values('id').reset_index(drop=True)
+        target_df = target_df.sort_values('id').reset_index(drop=True)
+        meta_df = meta_df.sort_values('id').reset_index(drop=True)
+
+        # Verify sample count
+        num_samples = descriptors_df.shape[0]
+        if target_df.shape[0] != num_samples or meta_df.shape[0] != num_samples:
+            lprint(ll.ERROR, f"Sample count mismatch: descriptors={num_samples}, target={target_df.shape[0]}, meta={meta_df.shape[0]}")
+            raise ValueError("Sample count mismatch between files")
+
+        # Create X_fusion
+        X_fusion = torch.tensor(descriptors_df.drop(columns=['id']).values, dtype=torch.float32)
+        lprint(ll.DEBUG, f"X_fusion shape: {X_fusion.shape}")
+
+        # Create y_fusion
+        y_fusion = [torch.tensor(target_df[target].values[:, None], dtype=torch.float32).clone().detach() for target in targets]
+        lprint(ll.DEBUG, f"y_fusion shapes: {[y.shape for y in y_fusion]}")
+
+        # Create valid_mask
+        valid_mask = [torch.tensor(meta_df[f"{target}_valid"].values, dtype=torch.bool).clone().detach() for target in targets]
+        lprint(ll.DEBUG, f"valid_mask shapes: {[m.shape for m in valid_mask]}")
+
+        # Validate shapes
+        num_samples = X_fusion.shape[0]
+        if any(y.shape[0] != num_samples for y in y_fusion) or any(m.shape[0] != num_samples for m in valid_mask):
+            lprint(ll.ERROR, f"Shape mismatch between X_fusion ({num_samples}), y_fusion {[y.shape[0] for y in y_fusion]}, and valid_mask {[m.shape[0] for m in valid_mask]}")
+            raise ValueError("Shape mismatch between X_fusion, y_fusion, and valid_mask")
+
+        # Log valid data statistics
+        for target, mask in zip(targets, valid_mask):
+            valid_count = mask.sum().item()
+            lprint(ll.INFO, f"{target}: {valid_count} real values, {num_samples - valid_count} imputed")
+
+        lprint(ll.INFO, "Fusion dataset loaded successfully")
+        return X_fusion, y_fusion, valid_mask
+
+    except Exception as e:
+        lprint(ll.ERROR, f"Error loading fusion dataset: {str(e)}")
+        raise
+
+def main():
+    # Example configuration (adjust based on your needs)
+    hrm_config = HRMConfig(
+        input_size=1,  # Since FusionModel takes teacher outputs as input
+        num_targets=5,
+        context_size=128,
+        low_hidden=256,
+        high_hidden=512,
+        act_eps=0.01,
+        max_high_steps=10,
+        max_low_steps=5,
+        dropout_prob=0.1,
+        batch_norm=True,
+        output_dir="./output"
     )
 
-    return search_space, report
+    training_config = TrainingConfig(
+        learning_rate_fusion=0.001,
+        learning_rate_teachers=0.001,  # Increased to match fusion model
+        batch_size=32,
+        max_epochs=100,
+        patience=10,
+        output_dir="./output"
+    )
+    targets = ["Tg", "FFV", "Tc", "Density", "Rg"]
 
-def train_model(model: TransformerFusionModel, dataloader: DataLoader, teacher_models: list, 
-                weights: torch.Tensor, alpha: float, beta: float, config) -> float:
-    lprint(ll.INFO, "Starting model training")
-    try:
-        optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=1e-5)
-        criterion = wMAE_loss
-        
-        model.train()
-        best_val_loss = float('inf')
-        patience = config.patience if hasattr(config, 'patience') else 10
-        counter = 0
-        
-        for epoch in range(config.max_epochs):
-            epoch_loss = 0.0
-            for batch in dataloader:
-                inputs = batch[0].to(config.device)  # [batch_size, 5, 614]
-                true_targets = batch[1].to(config.device)  # [batch_size, 5, 1]
-                mask = batch[2].to(config.device)  # [batch_size, 5]
-                
-                try:
-                    teacher_outputs = []
-                    for i, teacher in enumerate(teacher_models):
-                        valid_indices = mask[:, i]
-                        if valid_indices.any():
-                            teacher_out = teacher(inputs[valid_indices, i]).detach()
-                            full_out = torch.zeros(inputs.shape[0], 1, device=config.device)
-                            full_out[valid_indices] = teacher_out
-                            teacher_outputs.append(full_out)
-                        else:
-                            teacher_outputs.append(torch.zeros(inputs.shape[0], 1, device=config.device))
-                except Exception as e:
-                    lprint(ll.ERROR, f"Error in epoch {epoch+1}: {str(e)}")
-                    raise
-                
-                optimizer.zero_grad()
-                outputs = model(teacher_outputs, mask=mask)  # [batch_size, 5]
-                
-                loss_sup = 0.0
-                valid_batches = 0
-                for i in range(len(true_targets[0])):
-                    valid_indices = mask[:, i]
-                    if valid_indices.any():
-                        valid_outputs = outputs[valid_indices, i:i+1]
-                        valid_targets = true_targets[valid_indices, i]
-                        loss_sup += criterion([valid_outputs], [valid_targets], weights[i:i+1])
-                        valid_batches += 1
-                loss_sup = loss_sup / max(valid_batches, 1)
-                
-                loss_dist = sum(torch.mean((o - t) ** 2) for o, t in zip([outputs[:, i:i+1] for i in range(len(teacher_outputs))], teacher_outputs))
-                loss = alpha * loss_sup + beta * loss_dist
-                
-                loss.backward()
-                optimizer.step()
-                epoch_loss += loss.item()
-            
-            avg_loss = epoch_loss / len(dataloader)
-            per_target_mae = []
-            for i in range(len(true_targets[0])):
-                valid_indices = mask[:, i]
-                if valid_indices.any():
-                    mae = torch.mean(torch.abs(outputs[valid_indices, i] - true_targets[valid_indices, i])).item()
-                    per_target_mae.append(mae)
-                else:
-                    per_target_mae.append(float('nan'))
-            lprint(ll.INFO, f"Epoch {epoch+1}/{config.max_epochs}, Loss: {avg_loss:.4f}, Per-target MAE: {per_target_mae}")
-            
-            if avg_loss < best_val_loss - getattr(config, 'min_delta', 1e-4):
-                best_val_loss = avg_loss
-                counter = 0
-            else:
-                counter += 1
-            if counter >= patience:
-                lprint(ll.INFO, f"Early stopping at epoch {epoch+1}")
-                break
-        
-        lprint(ll.INFO, f"Training completed with best validation loss: {best_val_loss:.4f}")
-        return best_val_loss
-    except Exception as e:
-        lprint(ll.ERROR, f"Error in train_model: {str(e)}")
-        raise
+    # Load dataset
+    X_fusion, y_fusion_list, valid_mask_list = load_fusion_dataset(targets)
 
-from src.utils.logging import lprint, LoggingLevels as ll
+    # Convert y_fusion and valid_mask from lists to tensors
+    y_fusion = torch.cat(y_fusion_list, dim=1)  # [num_samples, num_targets]
+    valid_mask = torch.stack(valid_mask_list, dim=1)  # [num_samples, num_targets]
+    lprint(ll.DEBUG, f"y_fusion shape: {y_fusion.shape}, valid_mask shape: {valid_mask.shape}")
 
-def objective_function(params, metadata_file: str, descriptor_files: list[str], targets: list[str], 
-                      teacher_models: list, weights: torch.Tensor, config) -> float:
-    try:
-        lprint(ll.INFO, f"Evaluating objective function with params: {params}")
-        lr, batch_size, dropout_prob, num_layers, hidden_dim, nhead, alpha, beta = params
-        
-        config.learning_rate = lr
-        config.batch_size = int(batch_size)
-        config.dropout_prob = dropout_prob
-        
-        dataloader = create_dataloader(metadata_file, descriptor_files, targets, config.batch_size, 
-                                      shuffle=config.shuffle, num_workers=config.num_workers, pin_memory=config.pin_memory)
-        
-        teacher_output_sizes = [teacher.output_size for teacher in teacher_models]
-        model = TransformerFusionModel(
-            teacher_output_sizes=teacher_output_sizes,
-            hidden_dim=int(hidden_dim),
-            nhead=int(nhead),
-            num_layers=int(num_layers),
-            dropout=dropout_prob,
-            batch_norm=config.batch_norm
-        ).to(config.device)
-        lprint(ll.INFO, "Transformer fusion model initialized")
-        
-        val_loss = train_model(model, dataloader, teacher_models, weights, alpha, beta, config)
-        lprint(ll.INFO, f"Objective function evaluation completed with val_loss: {val_loss:.4f}")
-        return val_loss
-    except Exception as e:
-        lprint(ll.ERROR, f"Error in objective_function: {str(e)}")
-        raise
+    # Create dataset and dataloaders
+    dataset = TensorDataset(X_fusion, y_fusion, valid_mask)
+    train_size = int((1 - training_config.validation_split) * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+    train_loader = DataLoader(train_dataset, batch_size=training_config.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=training_config.batch_size, shuffle=False)
 
-from skopt import gp_minimize
-from skopt.space import Real, Integer
-from pathlib import Path
-import gc
-import torch
-from datetime import datetime
-from src.utils.logging import lprint, LoggingLevels as ll
-
-def fusion_model_main(targets: list[str], metadata_file: str, descriptor_files: list[str], project_root: str, 
-                     device, max_combination: int = 20):
-    lprint(ll.INFO, f"=== Transformer Fusion Model Training Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    try:
-        n_models = len(targets)
-        teacher_models = []
-        teacher_input_sizes = []
-        for i, target in enumerate(targets):
-            lprint(ll.INFO, f"Loading teacher model {i+1}/{n_models} for target {target}")
-            model_path = Path(f"{project_root}/output/{target}/best_model.pth")
-            if not model_path.exists():
-                raise FileNotFoundError(f"Model file not found: {model_path}")
-            model = ResultsManager.load_best_model(model_path=model_path)
-            model.eval()
-            model.to(device)
+    # Load teacher models
+    from training.results_manager import ResultsManager
+    teacher_models = []
+    for target in targets:
+        try:
+            model = ResultsManager.load_best_model(f"./output/{target}/best_model.pth")
             teacher_models.append(model)
-            teacher_input_sizes.append(model.input_size)
-            lprint(ll.INFO, f"Teacher model for {target} loaded, input_size={model.input_size}")
+            lprint(ll.SUCCESS, f"Loaded teacher model for {target}")
+        except Exception as e:
+            lprint(ll.ERROR, f"Failed to load teacher model for {target}: {str(e)}")
+            raise
 
-        # Verify input size consistency
-        if len(set(teacher_input_sizes)) > 1:
-            raise ValueError(f"Inconsistent input sizes for teacher models: {teacher_input_sizes}")
-        
-        weights = compute_wmae_weights(descriptor_files, targets).to(device)
-        lprint(ll.INFO, f"Computed wMAE weights: {weights.tolist()}")
+    # Initialize fusion model
+    fusion_model = FusionModel(hrm_config)
 
-        fusion_config = ConfigManager.create_default_config("fusion")
-        fusion_config.output_dir = f"{fusion_config.output_dir}/transformer_fusion_model"
-        Path(fusion_config.output_dir).mkdir(parents=True, exist_ok=True)
-        lprint(ll.INFO, f"Output directory: {fusion_config.output_dir}")
+    # Initialize trainer
+    trainer = FusionTrainer(fusion_model, teacher_models, training_config)
 
-        # Estimate dataset size
-        metadata = np.loadtxt(metadata_file, delimiter='\t', dtype=str, skiprows=1)
-        n_samples = metadata.shape[0]
-        data = np.loadtxt(descriptor_files[0], delimiter='\t')
-        n_features = data.shape[1] - 1
-        
-        teacher_output_sizes = [teacher.output_size for teacher in teacher_models]
-        space, report = generate_bayesian_search(n_samples, n_features, teacher_output_sizes, 
-                                                problem_type=fusion_config.problem_type, 
-                                                max_combinations=max_combination)
-        lprint(ll.INFO, report)
+    # Train
+    lprint(ll.INFO, "Starting training...")
+    trainer.train(train_loader, val_loader, targets)
+    lprint(ll.SUCCESS, "Training completed")
 
-        result = gp_minimize(
-            lambda params: objective_function(params, metadata_file, descriptor_files, targets, 
-                                             teacher_models, weights, fusion_config),
-            space,
-            n_calls=max_combination,
-            random_state=42,
-            verbose=True
-        )
-        lprint(ll.INFO, "Bayesian optimization completed")
+    # Example single-target prediction
+    sample_X = X_fusion[:10]  # Example input
+    for i, (teacher, target) in enumerate(zip(teacher_models, targets)):
+        prediction = predict_single_target(teacher, sample_X, device=training_config.device)
+        lprint(ll.INFO, f"Teacher {target} predictions: {prediction.squeeze().tolist()}")
 
-        best_params = result.x
-        lr, batch_size, dropout_prob, num_layers, hidden_dim, nhead, alpha, beta = best_params
-        
-        fusion_config.learning_rate = lr
-        fusion_config.batch_size = int(batch_size)
-        fusion_config.dropout_prob = dropout_prob
-        lprint(ll.INFO, f"Best hyperparameters: lr={lr}, batch_size={batch_size}, dropout={dropout_prob}, "
-                       f"num_layers={num_layers}, hidden_dim={hidden_dim}, nhead={nhead}, alpha={alpha}, beta={beta}")
-
-        dataloader = create_dataloader(metadata_file, descriptor_files, targets, fusion_config.batch_size, 
-                                      shuffle=fusion_config.shuffle, num_workers=fusion_config.num_workers, 
-                                      pin_memory=fusion_config.pin_memory)
-
-        final_model = TransformerFusionModel(
-            teacher_output_sizes=teacher_output_sizes,
-            hidden_dim=int(hidden_dim),
-            nhead=int(nhead),
-            num_layers=int(num_layers),
-            dropout=dropout_prob,
-            batch_norm=fusion_config.batch_norm
-        ).to(device)
-        
-        final_loss = train_model(final_model, dataloader, teacher_models, weights, alpha, beta, fusion_config)
-        lprint(ll.INFO, f"Final model trained with loss: {final_loss:.4f}")
-
-        output_path = Path(f"{fusion_config.output_dir}/best_transformer_fusion_model.pth")
-        torch.save(final_model.state_dict(), output_path)
-        lprint(ll.INFO, f"Model saved to {output_path}")
-
-        return final_model, final_loss
-    except Exception as e:
-        lprint(ll.ERROR, f"Error in fusion_model_main: {str(e)}")
-        raise
-    finally:
-        lprint(ll.INFO, "Cleaning up resources")
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+if __name__ == "__main__":
+    main()
