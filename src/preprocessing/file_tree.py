@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List, Dict, Union, Tuple
 import pandas as pd
 from src.fingerprint.descriptors import calculate_descriptors
+from src.fingerprint.descriptors import change_atom_holders
 import os, shutil
 import numpy as np
 
@@ -19,7 +20,9 @@ def preprocessing_files(NeurIPSFiles: NeurIPSFiles, targets: List[str]):
     df_train = pd.read_csv(NeurIPSFiles.train, header=0)
     
     id_col = df_train.iloc[:, 0]
-    smiles = df_train.iloc[:, 1]
+    smiles_temp = df_train.iloc[:, 1]
+    smiles = change_atom_holders(smiles_temp.copy())
+    smiles_temp = None
     
     values = {}
     missing_indices = {}
