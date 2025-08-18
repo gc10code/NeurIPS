@@ -533,9 +533,9 @@ def objective(trial: optuna.Trial, targets: List[str], X_fusion: torch.Tensor,
     lprint(ll.INFO, f"Starting trial {trial.number}...")
     trainer.train(train_loader, val_loader, targets)
 
-    val_fusion_loss, _ = trainer.validate(val_loader, targets)
+    val_fusion_loss, _ , val_fusion_wmae, _ = trainer.validate(val_loader, targets)
     lprint(ll.INFO, f"Trial {trial.number} validation fusion loss: {val_fusion_loss:.4f}")
-
+    lprint(ll.INFO, f"Trial {trial.number} validation wMAE: {val_fusion_wmae:.4f}")
     return val_fusion_loss
 
 def optimize_hyperparameters(targets: List[str], X_fusion: torch.Tensor, 

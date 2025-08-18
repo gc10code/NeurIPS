@@ -20,8 +20,8 @@ class GlobalConfig:
     
     # FUSION Config
     MAX_EPOCHS_TEACHER: int = 5
-    FUSION_EPOCHS : int = 100
-    FUSION_PATIENCE: int = 10
+    FUSION_EPOCHS : int = 1
+    FUSION_PATIENCE: int = 1
     
 
 def global_init()-> GlobalConfig:
