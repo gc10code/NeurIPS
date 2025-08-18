@@ -115,10 +115,10 @@ class ConfigValidator:
             if config['act_eps'] > 0.5:
                 lprint(ll.ERROR, f"act_eps must be in (0,0.5], got {config['act_eps']}")
                 raise ValueError(f"act_eps must be in (0,0.5], got {config['act_eps']}")
-            if config['max_high_steps'] < 1 or config['max_high_steps'] > 10:
+            if config['max_high_steps'] < 1 or config['max_high_steps'] > 20:
                 lprint(ll.ERROR, f"max_high_steps must be in [1,10], got {config['max_high_steps']}")
                 raise ValueError(f"max_high_steps must be in [1,10], got {config['max_high_steps']}")
-            if config['max_low_steps'] < 1 or config['max_low_steps'] > 10:
+            if config['max_low_steps'] < 1 or config['max_low_steps'] > 20:
                 lprint(ll.ERROR, f"max_low_steps must be in [1,10], got {config['max_low_steps']}")
                 raise ValueError(f"max_low_steps must be in [1,10], got {config['max_low_steps']}")
 

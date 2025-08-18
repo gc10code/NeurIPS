@@ -17,21 +17,59 @@ device = setup_device()
 import numpy as np
 import pandas as pd
 
+from typing import Union, List, Optional, Tuple
+
 def compute_wmae_weights(true_targets: List[Tuple[torch.Tensor, torch.Tensor, int]]) -> torch.Tensor:
+    """
+    Compute weights for wMAE loss based on the number of valid samples and target ranges.
+
+    Args:
+        true_targets (List[Tuple[torch.Tensor, torch.Tensor, int]]): List of tuples containing
+            (target tensor, target tensor, number of valid samples) for each target.
+
+    Returns:
+        torch.Tensor: Weights for each target, shape [T].
+    """
     K = len(true_targets)
     
-    inverse_sqrt_scales = torch.tensor([1.0 * (target[2] ** 0.5) for target in true_targets])
-    range_norms = torch.tensor([(1.0 / (target[1].max() - target[1].min())) for target in true_targets])
+    # Initialize lists for scales and ranges
+    inverse_sqrt_scales = []
+    range_norms = []
+    
+    for target in true_targets:
+        valid_samples = target[2]
+        target_tensor = target[1]
+        
+        # Handle case where valid_samples is 0
+        if valid_samples == 0:
+            inverse_sqrt_scales.append(0.0)  # Assign zero weight to avoid division by zero
+        else:
+            inverse_sqrt_scales.append(1.0 / (valid_samples ** 0.5))
+        
+        # Compute range norm, handling case where max == min
+        target_range = target_tensor.max() - target_tensor.min()
+        if target_range == 0:
+            range_norms.append(1.0)  # Avoid division by zero by setting default range
+        else:
+            range_norms.append(1.0 / target_range)
+    
+    # Convert to tensors
+    inverse_sqrt_scales = torch.tensor(inverse_sqrt_scales)
+    range_norms = torch.tensor(range_norms)
+    
+    # Normalize weights
     weight_normalization = inverse_sqrt_scales.sum()
-    # it is product element * element, not vectorial product!
-    weights = K * range_norms * inverse_sqrt_scales / weight_normalization
+    if weight_normalization == 0:
+        # If all targets have zero valid samples, return equal weights
+        weights = torch.ones(K) / K
+    else:
+        weights = K * range_norms * inverse_sqrt_scales / weight_normalization
     
     return weights
 
-
 def wMAE_loss(
     predictions: torch.Tensor,
-    targets: Union[torch.Tensor ,List[torch.Tensor]],
+    targets: Union[torch.Tensor, List[torch.Tensor]],
     weights: torch.Tensor,
     valid_mask: Optional[List[torch.Tensor]] = None
 ) -> torch.Tensor:
@@ -47,109 +85,32 @@ def wMAE_loss(
     Returns:
         torch.Tensor: Weighted MAE loss, averaged over valid entries.
     """
-    #lprint(ll.REPORT, f"Mask {valid_mask.di}")
-    #lprint(ll.REPORT, f"targets {targets}")
-    #lprint(ll.REPORT, f"weights {weights}")
-    #lprint(ll.REPORT, f"prediction {predictions}")
-    try:
-        # Ensure predictions is a tensor
-        if not isinstance(predictions, torch.Tensor):
-            lprint(ll.ERROR, f"Predictions must be a tensor, got {type(predictions)}")
-            raise ValueError("Invalid predictions format")
+    if isinstance(targets, list):
+        targets = torch.cat(targets, dim=-1)
+    
+    if predictions.shape != targets.shape:
+        raise ValueError(f"Shape mismatch: predictions {predictions.shape}, targets {targets.shape}")
 
-        # Ensure predictions and targets are on the same device
-        device = predictions.device
-        if isinstance(targets, torch.Tensor):
-            targets = targets.to(device)
-        else:
-            targets = [t.to(device) for t in targets]
-        weights = weights.to(device)
+    absolute_error = torch.abs(predictions - targets)
 
-        # Handle single-target case
-        if predictions.ndim == 1 or (predictions.ndim == 2 and predictions.shape[1] == 1):
-            # Normalize to [B]
-            B = predictions.shape[0]
-            T = 1
-            if predictions.ndim == 2:
-                predictions = predictions.squeeze(1)  # [B, 1] -> [B]
-            if isinstance(targets, torch.Tensor):
-                if targets.ndim == 1:
-                    targets = targets  # [B]
-                elif targets.ndim == 2 and targets.shape[1] == 1:
-                    targets = targets.squeeze(1)  # [B, 1] -> [B]
-                else:
-                    lprint(ll.ERROR, f"Shape mismatch: predictions {predictions.shape} vs targets {targets.shape}")
-                    raise ValueError("Shape mismatch between predictions and targets")
-            else:
-                if len(targets) != 1:
-                    lprint(ll.ERROR, f"Expected 1 target for single-target case, got {len(targets)}")
-                    raise ValueError("Invalid number of targets")
-                targets = targets[0].squeeze(-1)  # [B, 1] -> [B]
-            weights = weights[0:1]  # Ensure weights is [1]
-            valid_mask = [valid_mask[0]] if valid_mask is not None else None
-        elif predictions.ndim == 2:
-            # Multi-target case
-            B, T = predictions.shape
-            if isinstance(targets, torch.Tensor):
-                if targets.shape != (B, T):
-                    lprint(ll.ERROR, f"Shape mismatch: predictions {predictions.shape} vs targets {targets.shape}")
-                    raise ValueError("Shape mismatch between predictions and targets")
-            else:
-                # Convert list of [B, 1] to [B, T]
-                targets = torch.stack([t.squeeze(-1) for t in targets], dim=1)  # [B, T]
-                if targets.shape != (B, T):
-                    lprint(ll.ERROR, f"Shape mismatch: predictions {predictions.shape} vs targets {targets.shape}")
-                    raise ValueError("Shape mismatch between predictions and targets")
-        else:
-            lprint(ll.ERROR, f"Invalid predictions shape {predictions.shape}")
-            raise ValueError("Invalid predictions shape")
+    if valid_mask is not None:
+        if isinstance(valid_mask, list):
+            valid_mask = torch.stack(valid_mask, dim=-1)
+        if valid_mask.shape != absolute_error.shape:
+            raise ValueError(f"Shape mismatch: valid_mask {valid_mask.shape}, absolute_error {absolute_error.shape}")
+        absolute_error = absolute_error * valid_mask.float()
+        valid_counts = valid_mask.float().sum(dim=0).clamp(min=1)
+    else:
+        valid_counts = torch.tensor([predictions.shape[0]] * predictions.shape[-1], device=predictions.device)
 
-        # Initialize validity mask if not provided
-        if valid_mask is None:
-            if T == 1:
-                valid_mask = [~torch.isnan(targets)] if predictions.ndim == 1 else [~torch.isnan(targets.squeeze(-1))]
-            else:
-                valid_mask = [~torch.isnan(targets[:, i]) for i in range(T)]
-            lprint(ll.WARN, "No valid_mask provided, assuming non-NaN targets are valid")
-        # Ensure valid_mask matches the number of targets
-        if len(valid_mask) != T:
-            lprint(ll.ERROR, f"Valid mask length {len(valid_mask)} does not match number of targets {T}")
-            raise ValueError("Invalid valid_mask length")
+    if weights.shape[0] != absolute_error.shape[-1]:
+        raise ValueError(f"Shape mismatch: weights {weights.shape}, absolute_error {absolute_error.shape}")
+    weighted_error = absolute_error * weights
+    total_weighted_error = weighted_error.sum()
+    total_valid = valid_counts.sum()
+    wmae = total_weighted_error / total_valid.clamp(min=1)
 
-        # Ensure valid_mask is on the correct device
-        valid_mask = [m.to(device) if isinstance(m, torch.Tensor) else torch.tensor(m, dtype=torch.bool, device=device) for m in valid_mask]
-
-        # Compute weighted MAE
-        loss = 0.0
-        for i in range(T):
-            p = predictions[:, i] if T > 1 else predictions  # [B]
-            t = targets[:, i] if T > 1 else targets  # [B]
-            w = weights[i] if T > 1 else weights[0]  # Scalar
-            m = valid_mask[i]  # [B]
-            valid = m & (~torch.isnan(t))  # Combine mask with NaN check
-            if valid.any():
-                mae = torch.abs(p[valid] - t[valid]).mean()
-                loss += w * mae
-                lprint(ll.DEBUG, f"Target {i if T > 1 else 0}: {valid.sum().item()} valid entries, MAE = {mae.item():.4f}")
-                
-            else:
-                lprint(ll.DEBUG, f"No valid real values for target {i if T > 1 else 0} in batch: Skip")
-        
-
-        # Normalize by number of targets
-        loss = loss / T if T > 0 else torch.tensor(0.0, device=device)
-        lprint(ll.DEBUG, f"Weighted MAE loss: {loss.item():.4f}")
-
-        return loss
-
-    except Exception as e:
-        lprint(ll.ERROR, f"Error in wMAE_loss: {str(e)}")
-        raise
-    finally:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-
+    return wmae
 
 def evaluate_model(model: RPropMLP, data_loader: DataLoader, device: torch.device,
                   normalizer: Optional[DataNormalizer] = None,

@@ -21,7 +21,7 @@ from src.config.config_manager import ConfigManager
 from src.utils.data_reader import read_tsv_to_tensor
 from src.training.data_preparation import clean_datasets
 from src.training.train_rprop_mlp import rprop_mlp_main
-from src.training.train_fusion_model import fusion_model_main
+from src.training.train_fusion_model import fusion_main
 from src.preprocessing.proccess import preprocessing_main
 from src.preprocessing.fusion_dataset import create_fusion_dataset, load_fusion_dataset
 from src.utils.system_utils import *
@@ -159,7 +159,7 @@ if __name__ == "__main__":
                 remove_dir(Path(fusion_config.output_dir))
                 os.makedirs(fusion_config.output_dir, exist_ok=True)
                 
-                fusion_model, final_loss = fusion_model_main(targets, true_targets, X_fusion, y_fusion, valid_mask, device, global_config.MAX_COMBINATION)
+                fusion_model, final_loss = fusion_main(targets, true_targets, X_fusion, y_fusion, valid_mask, device)
                 lprint(ll.INFO, f"Fusion model training completed with final loss: {final_loss:.4f}")
             except Exception as e:
                 lprint(ll.ERROR, f"Fusion model training failed: {str(e)}")

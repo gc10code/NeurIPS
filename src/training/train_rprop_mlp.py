@@ -154,7 +154,7 @@ def train_model(model: RPropMLP,
         )
         """
         optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
-        criterion = nn.L1Loss() if config.problem_type == 'regression' else nn.CrossEntropyLoss()
+        criterion = nn.SmoothL1Loss() if config.problem_type == 'regression' else nn.CrossEntropyLoss()
         
         early_stopping = EarlyStopping(
             patience=config.patience,
