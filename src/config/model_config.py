@@ -136,8 +136,6 @@ class HRMConfig:
     act_eps: float
     max_high_steps: int
     max_low_steps: int
-    alpha: float = 1.0  # weight of supervised loss
-    beta: float = 0.5   # weight of distillation loss
     one_step_detach: bool = False
     
     # Common parameters

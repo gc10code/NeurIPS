@@ -1,14 +1,8 @@
 import torch
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from typing import Optional, Tuple, Union
-import logging
-
-from src.utils.validators import DataValidator
-from src.utils.logging import lprint, LoggingLevels as ll
 
 from src.utils.logging import lprint, LoggingLevels as ll
-from typing import Tuple, Optional, Union
-import torch
 
 class DataNormalizer:
     """Handles data normalization with checks for pre-normalized data."""
@@ -31,8 +25,6 @@ class DataNormalizer:
     
     def fit_transform(self, X: torch.Tensor, y: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Fit and transform input and output tensors with specified normalization."""
-        X, y = DataValidator.validate_data(X, y)  # Assumes DataValidator supports torch.Tensor
-        
         if self.input_norm != 'none' and self._is_normalized(X):
             lprint(ll.INFO, "Input data appears already normalized, skipping normalization")
             self.input_norm = 'none'

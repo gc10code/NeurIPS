@@ -4,6 +4,7 @@ import logging
 
 from src.utils.activations import validate_activations, ACTIVATION_FUNCTIONS
 from src.utils.logging import lprint, LoggingLevels as ll
+from src.utils.normalizer import DataNormalizer
 
 from dataclasses import asdict
 
