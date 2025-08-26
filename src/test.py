@@ -1,10 +1,16 @@
-import sys
 from pathlib import Path
+import pickle
+import sys, os
 
 project_root = str(Path(__file__).resolve().parent.parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.training.train_fusion_model import main
+import pandas as pd
+import pandas as pd
+import numpy as np
+from typing import List, Dict
+from src.models.genetic_fusion import main_test_random
 
-main()
+main_test_random()
+

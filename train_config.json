@@ -1,0 +1,17 @@
+{
+    "random_seed": 42,
+    "num_workers": 4,
+    "n_estimators": 50,
+    "max_depth": 10,
+    "min_samples_split": 5,
+    "min_samples_leaf": 4,
+    "brain_hidden_dims": [64, 32],
+    "brain_dropout": 0.5,
+    "brain_lr": 0.001,
+    "brain_epochs": 20,
+    "brain_batch_size": 64,
+    "target_min": 0.0,
+    "target_max": 1500.0,
+    "output_dir": "output/regression",
+    "device": "cpu"
+}

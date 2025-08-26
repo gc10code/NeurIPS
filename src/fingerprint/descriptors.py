@@ -4,23 +4,8 @@ import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from mordred import Calculator, descriptors
+from typing import List
 from src.utils.logging import lprint, LoggingLevels as ll
-
-tg_descriptors = ['TopoPSA', 'PEOE_VSA1', 'PEOE_VSA2', 'PEOE_VSA3', 'PEOE_VSA4', 'PEOE_VSA5', 
-                  'PEOE_VSA6', 'PEOE_VSA7', 'PEOE_VSA8', 'PEOE_VSA9', 'PEOE_VSA10', 'PEOE_VSA11', 
-                  'PEOE_VSA12', 'PEOE_VSA13', 'SMR_VSA1', 'SMR_VSA2', 'SMR_VSA3', 'SMR_VSA4', 
-                  'SMR_VSA5', 'SMR_VSA6', 'SMR_VSA7', 'SMR_VSA8', 'SMR_VSA9', 'MW', 'AMW', 'BalabanJ', 'BertzCT']
-
-
-def change_atom_holders(smiles:pd.Series,
-                        atom_holders = '*',
-                        substitution_group = 'C') -> pd.Series:
-    """
-        Take in input a series that contain a the SMILES
-        and substituites the atom holders ('*' or another char that you can set)
-        with an functional group or another molecule that you desire to insert.
-    """
-    return smiles.str.replace(atom_holders, substitution_group)
 
 
 def is_not_numeric(series: pd.Series) -> bool:
@@ -99,7 +84,7 @@ def filter_descriptors(df_descriptor: pd.DataFrame,
     return df_descriptor[final_descriptors]
 
 
-def calculate_descriptors(smiles: pd.Series, filter: bool = True) -> pd.DataFrame:
+def calculate_descriptors(smiles: pd.Series, descritor_list:List) -> pd.DataFrame:
     """
     Calculate pandas DataFrame of descriptors from a Series of SMILES, ensuring descriptors in tg_descriptors are included.
     
@@ -114,7 +99,14 @@ def calculate_descriptors(smiles: pd.Series, filter: bool = True) -> pd.DataFram
     descriptor_calculator = Calculator(descriptors, ignore_3D=True)
     mol_list = [Chem.MolFromSmiles(s) for s in smiles]
     df_descriptor = descriptor_calculator.pandas(mol_list)
-    
+
+    if descritor_list:
+        # Ensure all specified descriptors are included
+        missing_descriptors = [desc for desc in descritor_list if desc not in df_descriptor.columns]
+        if missing_descriptors:
+            lprint(ll.WARN, f"The following descriptors are not available and will be ignored: {missing_descriptors}")
+        df_descriptor = df_descriptor[[desc for desc in descritor_list if desc in df_descriptor.columns]]
+
     # Filter for numeric columns
     valid_cols = [col for col in df_descriptor.columns if is_not_numeric(df_descriptor[col])]
     df_descriptor = df_descriptor[valid_cols]
@@ -128,18 +120,5 @@ def calculate_descriptors(smiles: pd.Series, filter: bool = True) -> pd.DataFram
         if col_data.isnull().any() or (zero_c / len(col_data)) > 0.049:
             col_to_remove.append(des)
     df_descriptor.drop(columns=col_to_remove, inplace=True)
-    
-    # Store tg_descriptors that are available in the DataFrame
-    available_tg_descriptors = [col for col in tg_descriptors if col in df_descriptor.columns]
-    
-    # Apply filtering if requested
-    if filter:
-        df_filtered = filter_descriptors(df_descriptor.copy())
-        # Ensure tg_descriptors are included in the final DataFrame
-        missing_tg_descriptors = [col for col in available_tg_descriptors if col not in df_filtered.columns]
-        if missing_tg_descriptors:
-            # Add missing tg_descriptors back from the original df_descriptor
-            df_filtered = pd.concat([df_filtered, df_descriptor[missing_tg_descriptors]], axis=1)
-        return df_filtered
     
     return df_descriptor

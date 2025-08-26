@@ -9,6 +9,12 @@ from pathlib import Path
 import logging
 from typing import Optional
 from src.utils.logging import lprint, LoggingLevels as ll
+import subprocess
+import functools
+import sys
+import os
+import tempfile
+import inspect
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -38,7 +44,7 @@ def monitor_memory() -> Dict[str, float]:
         return {'rss_gb': -1, 'vms_gb': -1, 'percent': -1}
     
 
-def setup_device(device: Optional[torch.device] = torch.device('cpu')) -> torch.device:
+def setup_device(device: Optional[torch.device] = None) -> torch.device:
     """Set up the computation device (CPU or GPU)."""
     if not device:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -56,3 +62,4 @@ def remove_dir(path:Path):
 def signal_handler(sig, frame):
     lprint(ll.EXIT, "Received interrupt signal, shutting down")
     raise SystemExit()
+
