@@ -134,7 +134,12 @@ class EnsembleTrainer:
         log_print(ll.INFO, f"Initialized EnsembleTrainer for {len(target_names)} targets")
 
     def train_target(self, X_desc, X_fp, X_tab, y_dict: Dict[str, np.ndarray], fold_idx: int = None):
-        device = self.config.device
+        device = getattr(self.config, "device", None)
+        if isinstance(device, str) or device is None:
+            device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
+        elif not isinstance(device, torch.device):
+            device = torch.device(device)
+        #device = self.config.device
         log_print(ll.INFO, f"Starting training for {len(self.target_names)} targets{' (Fold ' + str(fold_idx) + ')' if fold_idx is not None else ''}")
         metrics = {t: {'train_mae': [], 'val_mae': [], 'best_val_loss': float('inf')} for t in self.target_names}
         log_buffer = []
@@ -168,18 +173,20 @@ class EnsembleTrainer:
                 self.config.use_batch_norm, self.config.use_residual
             ).to(device)
             optimizer = torch.optim.Adam(mlp.parameters(), lr=self.config.brain_lr, weight_decay=1e-4)
-            criterion = nn.MSELoss()
+            criterion = nn.MSELoss().to(device)
 
             dataset_tr = TensorDataset(
-                torch.tensor(X_emb_tr, dtype=torch.float32, device=device),
-                torch.tensor(y_tr, dtype=torch.float32, device=device).reshape(-1, 1)
+                torch.tensor(X_emb_tr, dtype=torch.float32),
+                torch.tensor(y_tr, dtype=torch.float32).reshape(-1, 1)
             )
             dataset_val = TensorDataset(
-                torch.tensor(X_emb_val, dtype=torch.float32, device=device),
-                torch.tensor(y_val, dtype=torch.float32, device=device).reshape(-1, 1)
+                torch.tensor(X_emb_val, dtype=torch.float32),
+                torch.tensor(y_val, dtype=torch.float32).reshape(-1, 1)
             )
-            loader_tr = DataLoader(dataset_tr, batch_size=self.config.brain_batch_size, shuffle=True, num_workers=0, pin_memory=True)
-            loader_val = DataLoader(dataset_val, batch_size=self.config.brain_batch_size, shuffle=False, num_workers=0, pin_memory=True)
+
+            use_cuda = (device.type == "cuda")
+            loader_tr = DataLoader(dataset_tr, batch_size=self.config.brain_batch_size, shuffle=True, num_workers=0, pin_memory=use_cuda)
+            loader_val = DataLoader(dataset_val, batch_size=self.config.brain_batch_size, shuffle=False, num_workers=0, pin_memory=use_cuda)
 
             mlp.train()
             best_val_loss = float('inf')
@@ -189,6 +196,8 @@ class EnsembleTrainer:
             for epoch in tqdm(range(self.config.brain_epochs), desc=f"MLP Epochs (Target: {target})", leave=False):
                 total_loss = 0
                 for xb, yb in loader_tr:
+                    xb = xb.to(device, non_blocking=True)
+                    yb = yb.to(device, non_blocking=True)
                     optimizer.zero_grad(set_to_none=True)
                     y_pred = mlp(xb)
                     loss = criterion(y_pred, yb)
@@ -203,6 +212,8 @@ class EnsembleTrainer:
                 val_mae = 0
                 with torch.no_grad():
                     for xb, yb in loader_val:
+                        xb = xb.to(device, non_blocking=True)
+                        yb = yb.to(device, non_blocking=True)
                         y_pred = mlp(xb)
                         val_loss += criterion(y_pred, yb).item()
                         val_mae += torch.mean(torch.abs(y_pred - yb)).item()
@@ -232,8 +243,8 @@ class EnsembleTrainer:
             # Final metrics
             mlp.eval()
             with torch.no_grad():
-                y_pred_tr = mlp(torch.tensor(X_emb_tr, dtype=torch.float32, device=device)).cpu().numpy().flatten()
-                y_pred_val = mlp(torch.tensor(X_emb_val, dtype=torch.float32, device=device)).cpu().numpy().flatten()
+                y_pred_tr = mlp(torch.tensor(X_emb_tr, dtype=torch.float32).to(device)).cpu().numpy().flatten()
+                y_pred_val = mlp(torch.tensor(X_emb_val, dtype=torch.float32).to(device)).cpu().numpy().flatten()
             train_mae = mean_absolute_error(y_tr, y_pred_tr)
             val_mae = mean_absolute_error(y_val, y_pred_val)
             metrics[target]['train_mae'] = train_mae

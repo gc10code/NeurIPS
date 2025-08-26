@@ -13,5 +13,5 @@
     "target_min": 0.0,
     "target_max": 1500.0,
     "output_dir": "output/regression",
-    "device": "cpu"
+    "device": "conda"
 }

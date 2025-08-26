@@ -35,10 +35,10 @@ def main():
 
     # Load data (aligned with main_regression)
     log_print(ll.INFO, "Loading data files...")
-    df_desc = pd.read_csv(descriptors_file, sep="\t", index_col=0)
-    df_morgan = pd.read_csv(morgan_file, sep="\t", index_col=0)
-    df_map4 = pd.read_csv(map4_file, sep="\t", index_col=0)
-    df_targets = pd.read_csv(targets_file, sep="\t", index_col=0)
+    df_desc = pd.read_csv(descriptors_file, sep="\t", index_col=0, dtype={0: str})
+    df_morgan = pd.read_csv(morgan_file, sep="\t", index_col=0, dtype={0: str})
+    df_map4 = pd.read_csv(map4_file, sep="\t", index_col=0, dtype={0: str})
+    df_targets = pd.read_csv(targets_file, sep="\t", index_col=0, dtype={0: str})
 
     # Ensure consistent indices across all dataframes
     ids = df_desc.index.intersection(df_morgan.index).intersection(df_map4.index).intersection(df_targets.index)
