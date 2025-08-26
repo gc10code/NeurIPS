@@ -7,7 +7,7 @@ def generate_test_datasets(output_dir="test_data", base_name="test"):
     np.random.seed(42)
 
     # Parameters
-    n_molecules = 10
+    n_molecules = 100
     n_desc_features = 5
     n_morgan_features = 8
     n_map4_features = 8

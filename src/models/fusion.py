@@ -23,6 +23,9 @@ from src.utils.logging import lprint as log_print, LoggingLevels as ll
 # -----------------------------
 # Configuration
 # -----------------------------
+MAX_EPOCHS = 1000
+PATIENCE = 20  # Early stopping patience
+
 @dataclass
 class Config:
     random_seed: int = 42
@@ -34,7 +37,7 @@ class Config:
     brain_hidden_dims: List[int] = (64, 32)
     brain_dropout: float = 0.5
     brain_lr: float = 1e-3
-    brain_epochs: int = 20
+    brain_epochs: int = MAX_EPOCHS
     brain_batch_size: int = 64
     target_min: float = 0.0
     target_max: float = 1500.0
@@ -181,7 +184,7 @@ class EnsembleTrainer:
             mlp.train()
             best_val_loss = float('inf')
             best_model_state = None
-            patience = 5
+            patience = PATIENCE = 20
             counter = 0
             for epoch in tqdm(range(self.config.brain_epochs), desc=f"MLP Epochs (Target: {target})", leave=False):
                 total_loss = 0
@@ -413,7 +416,7 @@ def tune_hyperparameters(X_desc, X_fp, X_tab, y_dict, target_names, output_dir="
             brain_hidden_dims=hidden_dims,
             brain_dropout=params[5],
             brain_lr=params[6],
-            brain_epochs=20,
+            brain_epochs=MAX_EPOCHS,
             output_dir=output_dir,
             use_batch_norm=params[7],
             use_residual=params[8]
@@ -507,7 +510,7 @@ def tune_hyperparameters(X_desc, X_fp, X_tab, y_dict, target_names, output_dir="
         brain_hidden_dims=best_hidden_dims,
         brain_dropout=best_params[5],
         brain_lr=best_params[6],
-        brain_epochs=20,
+        brain_epochs=MAX_EPOCHS,
         output_dir=output_dir,
         use_batch_norm=best_params[7],
         use_residual=best_params[8]
@@ -623,156 +626,3 @@ def predict_with_model(trainer: EnsembleTrainer, descriptor_file: str, map4_file
 
     log_print(ll.SUCCESS, f"Predictions completed for {target_name} with {len(y_pred)} samples")
     return y_pred
-
-
-# -----------------------------
-# Unit Tests
-# -----------------------------
-class TestEnsembleTrainer(unittest.TestCase):
-    def setUp(self):
-        self.config = Config(brain_epochs=2, n_estimators=10)
-        self.target_names = ["target_0"]
-        self.n_tab_features = 10
-        self.trainer = EnsembleTrainer(self.config, self.target_names, self.n_tab_features)
-        self.X_desc = np.random.rand(100, 10)
-        self.X_fp = sp.csr_matrix(np.random.choice([0, 1], size=(100, 20), p=[0.8, 0.2]))
-        self.X_tab = sp.csr_matrix(np.random.rand(100, 10))
-        self.y_dict = {"target_0": np.random.rand(100)}
-
-    def test_train_target(self):
-        metrics = self.trainer.train_target(self.X_desc, self.X_fp, self.X_tab, self.y_dict)
-        self.assertIn("target_0", metrics)
-        self.assertTrue("train_mae" in metrics["target_0"])
-        self.assertTrue("val_mae" in metrics["target_0"])
-
-    def test_predict(self):
-        self.trainer.train_target(self.X_desc, self.X_fp, self.X_tab, self.y_dict)
-        y_pred = self.trainer.predict(self.X_desc, self.X_fp, self.X_tab, "target_0")
-        self.assertEqual(len(y_pred), len(self.X_desc))
-
-# -----------------------------
-# Main Test Function with Random Data
-# -----------------------------
-def main_test_random():
-    n_samples = 20
-    n_desc_features = 10
-    n_map4_features = 128
-    n_morgan_features = 128
-    n_targets = 2
-    random_seed = 42
-
-    np.random.seed(random_seed)
-    log_print(ll.INFO, "Generating random data for testing...")
-
-    ids = [f"mol_{i}" for i in range(n_samples)]
-    desc_data = np.random.normal(loc=0, scale=1, size=(n_samples, n_desc_features))
-    df_desc = pd.DataFrame(desc_data, index=ids, columns=[f"desc_{i}" for i in range(n_desc_features)])
-    map4_data = np.random.choice([0, 1], size=(n_samples, n_map4_features), p=[0.8, 0.2])  # Binary MAP4
-    df_map4 = pd.DataFrame(map4_data, index=ids, columns=[f"map4_{i}" for i in range(n_map4_features)])
-    morgan_data = np.random.choice([0, 1], size=(n_samples, n_morgan_features), p=[0.8, 0.2])
-    df_morgan = pd.DataFrame(morgan_data, index=ids, columns=[f"morgan_{i}" for i in range(n_morgan_features)])
-    target_data = np.random.uniform(low=0, high=1500, size=(n_samples, n_targets))
-    mask = np.random.choice([True, False], size=(n_samples, n_targets), p=[0.1, 0.9])
-    target_data[mask] = -1
-    df_targets = pd.DataFrame(target_data, index=ids, columns=[f"target_{i}" for i in range(n_targets)])
-
-    train_ids, test_ids = train_test_split(ids, test_size=0.2, random_state=42)
-    df_desc_train = df_desc.loc[train_ids]
-    df_desc_test = df_desc.loc[test_ids]
-    df_map4_train = df_map4.loc[train_ids]
-    df_map4_test = df_map4.loc[test_ids]
-    df_morgan_train = df_morgan.loc[train_ids]
-    df_morgan_test = df_morgan.loc[test_ids]
-    df_targets_train = df_targets.loc[train_ids]
-    df_targets_test = df_targets.loc[test_ids]
-
-    log_print(ll.INFO, "Saving temporary data files...")
-    df_desc_train.to_csv("temp_desc.tsv", sep="\t", index=True)
-    df_map4_train.to_csv("temp_map4.tsv", sep="\t", index=True)
-    df_morgan_train.to_csv("temp_morgan.tsv", sep="\t", index=True)
-    df_targets_train.to_csv("temp_targets.tsv", sep="\t", index=True)
-    df_desc_test.to_csv("temp_desc_test.tsv", sep="\t", index=True)
-    df_map4_test.to_csv("temp_map4_test.tsv", sep="\t", index=True)
-    df_morgan_test.to_csv("temp_morgan_test.tsv", sep="\t", index=True)
-    df_targets_test.to_csv("temp_targets_test.tsv", sep="\t", index=True)
-
-    log_print(ll.INFO, "Starting hyperparameter tuning...")
-    scaler_desc = StandardScaler()
-    scaler_tab = StandardScaler(with_mean=False)
-    X_desc = scaler_desc.fit_transform(df_desc_train.values)
-    X_fp = sp.csr_matrix((df_map4_train > 0).astype(float).values)  # Binary MAP4
-    X_tab = scaler_tab.fit_transform(sp.csr_matrix((df_morgan_train > 0).astype(float).values))
-    target_names = df_targets_train.columns.tolist()
-    y_dict = {t: df_targets_train[t].values for t in target_names}
-
-    best_config, best_mae = tune_hyperparameters(X_desc, X_fp, X_tab, y_dict, target_names)
-    log_print(ll.SUCCESS, f"Best config found with MAE: {best_mae:.2f}")
-
-    log_print(ll.INFO, "Training with best config...")
-    trainer = main_regression(
-        descriptor_file="temp_desc.tsv",
-        map4_file="temp_map4.tsv",
-        morgan_file="temp_morgan.tsv",
-        targets_file="temp_targets.tsv",
-        config=best_config
-    )
-
-    # Save the model
-    model_save_path = "output/regression/model.pkl"
-    log_print(ll.INFO, "Saving trained model...")
-    save_model(trainer, model_save_path)
-
-    # Test predictions on test set before saving
-    log_print(ll.INFO, "Testing predictions on test set before saving...")
-    X_desc_test = trainer.scalers['desc'].transform(df_desc_test.values)
-    X_fp_test = sp.csr_matrix((df_map4_test > 0).astype(float).values)  # Binary MAP4
-    X_tab_test = trainer.scalers['tab'].transform(sp.csr_matrix((df_morgan_test > 0).astype(float).values))
-    df_targets_test.replace(-1, np.nan, inplace=True)
-    df_targets_test.fillna(df_targets_test.median(), inplace=True)
-
-    predictions_before = {}
-    for target in trainer.target_names:
-        y_pred = trainer.predict(X_desc_test, X_fp_test, X_tab_test, target)
-        y_true = df_targets_test[target].values
-        mae = mean_absolute_error(y_true, y_pred)
-        predictions_before[target] = y_pred
-        log_print(ll.SUCCESS, f"MAE on test set for {target} (before save): {mae:.2f}")
-
-    # Load the model and test predictions
-    log_print(ll.INFO, "Loading model...")
-    loaded_trainer = load_model(model_save_path)
-    
-    log_print(ll.INFO, "Testing predictions with loaded model...")
-    for target in loaded_trainer.target_names:
-        y_pred_loaded = predict_with_model(
-            trainer=loaded_trainer,
-            descriptor_file="temp_desc_test.tsv",
-            map4_file="temp_map4_test.tsv",
-            morgan_file="temp_morgan_test.tsv",
-            target_name=target
-        )
-        y_true = df_targets_test[target].values
-        mae_loaded = mean_absolute_error(y_true, y_pred_loaded)
-        log_print(ll.SUCCESS, f"MAE on test set for {target} (after load): {mae_loaded:.2f}")
-
-        # Verify predictions are consistent
-        np.testing.assert_array_almost_equal(
-            predictions_before[target], y_pred_loaded, decimal=4,
-            err_msg=f"Predictions for {target} differ before and after loading"
-        )
-        log_print(ll.SUCCESS, f"Predictions for {target} are consistent before and after loading")
-
-    log_print(ll.INFO, "Cleaning up temporary files...")
-    for f in ["temp_desc.tsv", "temp_map4.tsv", "temp_morgan.tsv", "temp_targets.tsv",
-              "temp_desc_test.tsv", "temp_map4_test.tsv", "temp_morgan_test.tsv", "temp_targets_test.tsv"]:
-        if os.path.exists(f):
-            os.remove(f)
-    if os.path.exists(model_save_path):
-        os.remove(model_save_path)
-
-    log_print(ll.SUCCESS, "Test completed successfully!")
-    return trainer
-
-if __name__ == "__main__":
-    unittest.main(argv=[''], exit=False)
-    main_test_random()

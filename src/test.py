@@ -10,7 +10,7 @@ import pandas as pd
 import pandas as pd
 import numpy as np
 from typing import List, Dict
-from src.models.genetic_fusion import main_test_random
+from src.models.fusion import main_test_random
 
 main_test_random()
 

@@ -7,7 +7,7 @@ import scipy.sparse as sp
 import os
 import joblib
 from src.utils.logging import lprint as log_print, LoggingLevels as ll
-from src.models.genetic_fusion import Config, EnsembleTrainer, RFComponent, TabularMLP
+from src.models.fusion import Config, EnsembleTrainer, RFComponent, TabularMLP
 
 
 def load_config(config_path: str) -> Config:
